@@ -1,0 +1,15 @@
+# directories
+venv*/
+.DS_Store
+.ipynb_checkpoints
+tutorial
+
+# files
+..gitignore.icloud
+*sublime*
+
+# extensions
+*.pyc
+*.egg-info
+*.swp
+
