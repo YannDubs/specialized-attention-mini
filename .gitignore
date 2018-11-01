@@ -4,7 +4,9 @@ venv*/
 .ipynb_checkpoints
 tutorial-reports
 __pycache__
-
+.vscode
+dist/
+build/
 
 # files
 ..gitignore.icloud

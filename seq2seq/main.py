@@ -547,7 +547,7 @@ def train(train_path,
     logger.setLevel(log_level.upper())
 
     if torch.cuda.is_available():
-        print("Cuda device set to %i" % cuda_device)
+        print("Cuda device set to {}".format(cuda_device))        
         torch.cuda.set_device(cuda_device)
 
     train, dev, src, tgt, oneshot = get_train_dev(train_path,
