@@ -325,13 +325,13 @@ class NLLLoss(Loss):
                  **kwargs):
         self.ignore_index = ignore_index
         self.size_average = size_average
-    
+
         super(NLLLoss, self).__init__(self._NAME,
                                       self._SHORTNAME,
                                       self._INPUTS,
                                       self._TARGETS,
                                       nn.NLLLoss(ignore_index=ignore_index,
-                                                 reduction='elementwise_mean' if size_average else 'none',
+                                                 size_average=size_average,
                                                  **kwargs),
                                       total_training_calls=total_training_calls,
                                       max_p_interpolators=max_p_interpolators)
