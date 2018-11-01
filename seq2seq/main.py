@@ -64,8 +64,8 @@ def get_seq2seq_model(src,
                       is_weight_norm=False,  # TO DO - medium: chose best and remove parameter + try layer normalization which should work better
                       dropout_input_encoder=0,  # TO DO - medium: give a single dictionary of kwargs defining `dropout_input_encoder`, `dropout_input_decoder`, `anneal_decoder_noise_input`. In constructor just intialize a list of each dropouts and then in `forward`, just call each of those.
                       dropout_input_decoder=0,
-                      anneal_mid_dropout=0.1,  # TO DO - medium: give a single dictionary of kwargs defining `anneal_mid_dropout`, `anneal_mid_noise`.
-                      anneal_mid_noise=0,
+                      anneal_mid_dropout=0.1,
+                      mid_noise_sigma=0,
                       is_highway=True,
                       initial_highway=0.7,  # TO DO - medium: chose best and remove parameter
                       is_single_carry=True,
@@ -76,8 +76,9 @@ def get_seq2seq_model(src,
                       key_size=32,
                       value_size=-1,
                       is_contained_kv=False,
-                      anneal_kq_dropout_output=0,
-                      anneal_kq_noise_output=0.15,  # TO DO - medium: keep only one between `anneal_kq_dropout_output`, `anneal_kq_noise_output
+                      value_noise_sigma=0,
+                      kq_noise_sigma=0,
+                      anneal_kq_noise=0.15,  # TO DO - medium: keep only one between `anneal_kq_dropout`, `anneal_kq_noise, `variational_kq`
                       is_position_attn=True,
                       n_steps_prepare_pos=None,
                       positioning_method="gaussian",
@@ -97,7 +98,8 @@ def get_seq2seq_model(src,
                       default_pos_perc=0.5,  # TO DO - medium: chose best and remove parameter
                       rounder_perc="concrete",  # TO DO - medium: chose best and remove parameter
                       is_dev_mode=False,
-                      is_viz_train=False):
+                      is_viz_train=False,
+                      is_sample_pos_attn=False):  # TO DOC
     """Return a initialized extrapolator model.
 
     Args:
@@ -124,10 +126,10 @@ def get_seq2seq_model(src,
             training calls, until it reaches `final_mid_dropout`. This
             parameter defines the percentage of training calls before the mdoel
             should reach `final_mid_dropout`.
-        anneal_mid_noise (float, optional): annealed noise between
-            the decoder and encoder. This parameter defines the percentage of
-            training calls before the noise model should reach the final relative
-            standard deviation.
+        mid_noise_sigma (float, optional) relative noise to add between the decoder
+            and encoder. This can be seen as a rough approximation to building a
+            variational latent representation as it forces the prediction of a
+            distribution rather than points.
         is_highway (bool, optional): whether to use a highway betwen the embedding
             and the value of the encoder.
         initial_highway (float, optional): initial highway carry rate. This can be
@@ -152,11 +154,15 @@ def get_seq2seq_model(src,
             as hidden size. Can also give percentage of hidden size betwen 0 and 1.
         is_contained_kv (bool, optional): whether to use different parts of the
             controller output as input for key and value generation.
-        anneal_kq_dropout_output (float, optional): annealed dropout to
-            the output of the key and query generator. This parameter
-            defines the percentage of training calls before the model should reach
-            the final dropout.
-        anneal_kq_noise_output (float, optional): annealed noise to
+        kq_noise_sigma (float, optional): relative noise to add to
+            the output of the key and query generator. This can be seen as a rough
+            approximation to building a variational latent representation as it
+            forces the prediction of a distribution rather than points.
+        value_noise_sigma (float, optional): relative noise to add to
+            the output of the key and query generator. This can be seen as a rough
+            approximation to building a variational latent representation as it
+            forces the prediction of a distribution rather than points.
+        anneal_kq_noise (float, optional): annealed noise to
             the output of the key and query generator. This parameter
             defines the percentage of training calls before the noise model should
             reach the final relative standard deviation.
@@ -295,16 +301,13 @@ def get_seq2seq_model(src,
     rate2steps = Rate2Steps(total_training_calls)
 
     # Encoder
-    kq_annealed_dropout_output_kwargs = dict(
-        n_steps_interpolate=rate2steps(anneal_kq_dropout_output))
-    kq_annealed_noise_output_kwargs = dict(
-        n_steps_interpolate=rate2steps(anneal_kq_noise_output))
+    kq_annealed_noise_kwargs = dict(n_steps_interpolate=rate2steps(anneal_kq_noise))
 
     key_kwargs = dict(output_size=key_size,
                       is_contained_kv=is_contained_kv,
                       is_mlps=is_mlps,
-                      annealed_dropout_output_kwargs=kq_annealed_dropout_output_kwargs,
-                      annealed_noise_output_kwargs=kq_annealed_noise_output_kwargs)
+                      annealed_noise_kwargs=kq_annealed_noise_kwargs,
+                      sigma_noise=kq_noise_sigma)
 
     highway_kwargs = dict(initial_highway=initial_highway,
                           is_single_carry=is_single_carry,
@@ -314,7 +317,8 @@ def get_seq2seq_model(src,
     value_kwargs = dict(output_size=value_size,
                         is_contained_kv=is_contained_kv,
                         is_highway=is_highway,
-                        highway_kwargs=highway_kwargs)
+                        highway_kwargs=highway_kwargs,
+                        sigma_noise=value_noise_sigma)
 
     encoder = EncoderRNN(len(src.vocab),
                          max_len,
@@ -355,7 +359,8 @@ def get_seq2seq_model(src,
                            regularizations=regularizations,
                            is_clamp_weights=is_clamp_weights,
                            rounder_weights_kwargs=rounder_weights_kwargs,
-                           rounder_mu_kwargs=rounder_mu_kwargs)
+                           rounder_mu_kwargs=rounder_mu_kwargs,
+                           is_sample_attn=is_sample_pos_attn)
 
     content_kwargs = dict(method=content_method)
 
@@ -390,11 +395,10 @@ def get_seq2seq_model(src,
 
     mid_dropout_kwargs = dict(
         n_steps_interpolate=rate2steps(anneal_mid_dropout))
-    mid_noise_kwargs = dict(n_steps_interpolate=rate2steps(anneal_mid_noise))
 
     seq2seq = Seq2seq(encoder, decoder,
                       mid_dropout_kwargs=mid_dropout_kwargs,
-                      mid_noise_kwargs=mid_noise_kwargs)
+                      mid_noise_sigma=mid_noise_sigma)
 
     seq2seq.set_dev_mode(value=is_dev_mode)
     seq2seq.set_viz_train(value=is_viz_train)
@@ -438,9 +442,9 @@ def train(train_path,
           is_amsgrad=True,  # TO DO - medium : chose best valeu and delete param
           rate_prepare_pos=0.05,
           is_confuse_key=False,
-          key_generator_criterion="l05",  # TO DO - medium : chose best valeu and delete param
+          key_generator_criterion="l1",  # TO DO - medium : chose and force
           is_confuse_query=False,
-          query_generator_criterion="l05",  # TO DO - medium : chose best valeu and delete param
+          query_generator_criterion="l1",  # TO DO - medium : chose and force
           n_steps_discriminate_only=15,
           n_steps_interpolate_confuser=0.05,
           plateau_reduce_lr=[4, 0.5],

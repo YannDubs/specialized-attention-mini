@@ -40,8 +40,8 @@ def get_regularizers_positioner(total_training_calls, n_steps_prepare_pos):
 
     _initialize_regularizer("pos_const_weights",
                             [dict(step=n_steps_prepare_pos, value=5e-2, mode="geometric"),
-                             dict(step=int(n_steps_prepare_pos * 3 / 2), value=0, mode="geometric"),
-                             dict(step=n_steps_prepare_pos * 2, value=5e-3)])
+                             dict(step=int(n_steps_prepare_pos * 3 / 2), value=1e-4, mode="geometric"),
+                             dict(step=n_steps_prepare_pos * 2, value=1e-2)])
 
     _initialize_regularizer("pos_old_weights",
                             [dict(step=0, value=5e-2, mode="linear"),
@@ -53,11 +53,11 @@ def get_regularizers_positioner(total_training_calls, n_steps_prepare_pos):
 
     _initialize_regularizer("pos_l0_weights",
                             [dict(step=n_steps_prepare_pos * 3, value=0, mode="linear"),
-                             dict(step=n_steps_prepare_pos * 6, value=5e-3, mode="geometric"),
-                             dict(step=n_steps_prepare_pos * 9, value=1e-3)])
+                             dict(step=n_steps_prepare_pos * 6, value=3e-2, mode="geometric"),
+                             dict(step=n_steps_prepare_pos * 9, value=1e-2)])
 
     _initialize_regularizer("pos_variance_weights",
-                            [dict(step=n_steps_prepare_pos, value=5e-3, mode="geometric"),
+                            [dict(step=n_steps_prepare_pos, value=5e-3, mode="linear"),
                              dict(step=n_steps_prepare_pos * 2, value=0)])
 
     _initialize_regularizer("pos_clamp_mu",
@@ -214,7 +214,8 @@ class PositionAttention(Module):
                  n_steps_interpolate_min_sigma=0,
                  min_sigma=0.41,
                  initial_sigma=5.0,
-                 lp_reg_weights=1):
+                 lp_reg_weights=1,
+                 is_sample_attn=False):  # TO DOC
         super(PositionAttention, self).__init__()
 
         self.n_steps_prepare_pos = n_steps_prepare_pos
@@ -225,6 +226,7 @@ class PositionAttention(Module):
         self.is_l0_bb_weights = "is_l0_bb_weights" in regularizations
         self.lp_reg_weights = lp_reg_weights
         self.is_clamp_weights = is_clamp_weights
+        self.is_sample_attn = is_sample_attn
 
         n_additional_mu_input = 9 - int(not self.is_content_attn)
 
@@ -308,6 +310,9 @@ class PositionAttention(Module):
 
         self.mean_attns_discounting_factor = Parameter(torch.tensor(0.0))
 
+        if self.is_sample_attn:
+            self.temperature = 0.999
+
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -331,7 +336,8 @@ class PositionAttention(Module):
                                                               "is_bb_bias",
                                                               "min_sigma",
                                                               "is_clamp_weights",
-                                                              "initial_sigma"])
+                                                              "initial_sigma",
+                                                              "is_sample_attn"])
 
     def forward(self,
                 decoder_outputs,
@@ -407,6 +413,12 @@ class PositionAttention(Module):
 
         # new size = (batch, n_queries, n_keys)
         pos_attn = pos_attn.transpose(2, 1)
+
+        if self.training and self.is_sample_attn and self.n_training_calls > self.n_steps_prepare_pos:
+            self.temperature = max(0.5, self.temperature**1.005)
+            soft_onehot = torch.distributions.RelaxedOneHotCategorical(self.temperature,
+                                                                       probs=pos_attn)
+            pos_attn = soft_onehot.rsample()
 
         self.add_to_visualize([mu, sigma, pos_confidence], ["mu", "sigma", "pos_confidence"])
 

@@ -261,15 +261,23 @@ class GaussianNoise(Module):
             deviation instead of absolute. Relative means that it will be
             multiplied by the magnitude of the value your are adding the noise
             to. This means that sigma can be the same regardless of the scale of
-            the vector.
+            the vector. This should be `True` unless you have a good reason not
+            to, indeed the model could bypass the noise if `False` by increasing
+            all by a scale factor.
         is_relative_detach (bool, optional): whether to detach the variable before
             computing the scale of the noise if `is_relative_sigma=True`. If
             `False` then the scale of the noise won't be seen as a constant but
             something to optimize: this will bias the network to generate vectors
             with smaller values.
+
+    Note: This can be though of as emulating a variational autoencoder. Indeed,
+        a variational autoencoder simply adds noise (to produce a distribution
+        and not points) and constrains the mean such that the model cannot increase
+        the mean to effectively remove the constant noise. By adding relative noise
+        you effectively remove that possibility.
     """
 
-    def __init__(self, sigma=0.1, is_relative_sigma=True, is_relative_detach=True):
+    def __init__(self, sigma=0.1, is_relative_sigma=True, is_relative_detach=False):
         super().__init__()
         self.sigma = sigma
         self.is_relative_sigma = is_relative_sigma
@@ -280,7 +288,7 @@ class GaussianNoise(Module):
         if self.training and self.sigma != 0:
             scale = self.sigma
             if self.is_relative_sigma:
-                scale = scale * (x.detach() if self.is_relative_detach else x)
+                scale = scale * abs((x.detach() if self.is_relative_detach else x))
             sampled_noise = self.noise.repeat(*x.size()).normal_() * scale
             x = x + sampled_noise
         return x
@@ -420,7 +428,7 @@ class StochasticRounding(Module):
     def extra_repr(self):
         return get_extra_repr(self, always_shows=["start_step"])
 
-    def forward(self, x):
+    def forward(self, x, is_update): # is_update just to use same syntax as concrete
         if not self.training:
             return x.round()
 

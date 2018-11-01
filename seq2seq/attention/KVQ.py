@@ -12,8 +12,8 @@ import torch.nn as nn
 from seq2seq.util.initialization import get_hidden0, weights_init, replicate_hidden0
 from seq2seq.util.helpers import renormalize_input_length, get_rnn, get_extra_repr
 from seq2seq.util.base import Module
-from seq2seq.util.torchextend import (MLP, ProbabilityConverter, AnnealedDropout,
-                                      AnnealedGaussianNoise, Highway)
+from seq2seq.util.torchextend import (MLP, ProbabilityConverter,
+                                      AnnealedGaussianNoise, Highway, GaussianNoise)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -43,6 +43,10 @@ class BaseKeyValueQuery(Module):
             of a linear layer.
         min_generator_hidden (int, optional): minimum number fof hidden neurons
             to use if using a MLP.
+        sigma_noise (float, optional): relative noise to add to
+            the output of the generator. This can be seen as a rough approximation
+            to building a variational latent representation as it forces the
+            prediction of a distribution rather than points.
     """
 
     def __init__(self, input_size,
@@ -50,7 +54,8 @@ class BaseKeyValueQuery(Module):
                  is_contained_kv=False,
                  min_input_size=32,
                  is_mlps=True,
-                 min_generator_hidden=16):
+                 min_generator_hidden=16,
+                 sigma_noise=0):
 
         super(BaseKeyValueQuery, self).__init__()
 
@@ -62,6 +67,7 @@ class BaseKeyValueQuery(Module):
         self.is_mlps = is_mlps
         self.min_generator_hidden = min_generator_hidden
         self.used_input_size = self._compute_used_input_size()
+        self.noise_output = GaussianNoise(sigma_noise)
 
     def _compute_used_input_size(self):
         return (max(self.min_input_size, self.output_size)
@@ -70,7 +76,8 @@ class BaseKeyValueQuery(Module):
     def extra_repr(self):
         return get_extra_repr(self,
                               always_shows=["input_size", "output_size"],
-                              conditional_shows=dict(is_contained_kv=False, is_mlps=True))
+                              conditional_shows=dict(is_contained_kv=False,
+                                                     is_mlps=True))
 
 
 class KQGenerator(BaseKeyValueQuery):
@@ -79,17 +86,14 @@ class KQGenerator(BaseKeyValueQuery):
     Args:
         input_size (int): size of the hidden activations of the controller,
             which will be given as input to the generator.
-        annealed_dropout_kwargs (float, optional): additional arguments to the
-            annealed output dropout.
-        annealed_noise_output_kwargs (float, optional): additional arguments to
+        annealed_noise_kwargs (float, optional): additional arguments to
             the annealed output noise.
         kwargs:
             Additional arguments for the `BaseKeyValueQuery` parent class.
     """
 
     def __init__(self, input_size,
-                 annealed_dropout_output_kwargs={},
-                 annealed_noise_output_kwargs={},
+                 annealed_noise_kwargs={},
                  **kwargs):
 
         super(KQGenerator, self).__init__(input_size, **kwargs)
@@ -102,8 +106,7 @@ class KQGenerator(BaseKeyValueQuery):
             self.generator = nn.Linear(self.used_input_size,
                                        self.output_size)
 
-        self.dropout_output = AnnealedDropout(**annealed_dropout_output_kwargs)
-        self.noise_output = AnnealedGaussianNoise(**annealed_noise_output_kwargs)
+        self.annealed_noise = AnnealedGaussianNoise(**annealed_noise_kwargs)
 
         self.reset_parameters()
 
@@ -122,8 +125,8 @@ class KQGenerator(BaseKeyValueQuery):
             input_generator = controller_out
 
         kq = self.generator(input_generator)
-        kq = self.dropout_output(kq, is_update=(step == 0))
-        kq = self.noise_output(kq, is_update=(step == 0))
+        kq = self.annealed_noise(kq, is_update=(step == 0))
+        kq = self.noise_output(kq)
 
         return kq
 
@@ -196,6 +199,10 @@ class ValueGenerator(BaseKeyValueQuery):
             input_generator = encoder_out
 
         values = self.generator(input_generator)
+        # by adding noise before highway you say that the inputs are not noisy
+        # this might not be true if learning word embedding but effectiveyly
+        # says that preference for highway
+        values = self.noise_output(values)
 
         if self.is_highway:
             values = self.highway(input_generator, embedded, values)

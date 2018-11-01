@@ -9,7 +9,7 @@ import torch
 
 from seq2seq.util.helpers import get_extra_repr
 from seq2seq.util.base import Module
-from seq2seq.util.torchextend import AnnealedGaussianNoise, AnnealedDropout
+from seq2seq.util.torchextend import GaussianNoise, AnnealedDropout
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -22,10 +22,10 @@ class Seq2seq(Module):
         encoder (EncoderRNN): object of EncoderRNN
         decoder (DecoderRNN): object of DecoderRNN
         mid_dropout_kwargs (dictionary, optonal): additional arguments to mid dropout.
-        mid_noise_kwargs (dictionary, optonal): additional arguments to mid noise.
-        is_dev_mode (bool, optional): whether to store many useful variables in
-            `additional`. Useful when predicting with a trained model in dev mode
-             to understand what the model is doing. Use with `dev_predict`.
+        mid_noise_sigma (float, optional) relative noise to add between the decoder
+            and encoder. This can be seen as a rough approximation to building a
+            variational latent representation as it forces the prediction of a
+            distribution rather than points.
 
     Inputs: input_variable, input_lengths, target_variable, teacher_forcing_ratio
         - **input_variable** (list, option): list of sequences, whose length is the batch size and within which
@@ -51,8 +51,8 @@ class Seq2seq(Module):
     """
 
     def __init__(self, encoder, decoder,
-                 mid_dropout_kwargs={},
-                 mid_noise_kwargs={}):
+                 mid_noise_sigma=0,
+                 mid_dropout_kwargs={}):
         super(Seq2seq, self).__init__()
 
         self.encoder = encoder
@@ -60,7 +60,7 @@ class Seq2seq(Module):
 
         self.mid_dropout = AnnealedDropout(**mid_dropout_kwargs)
         self.is_update_mid_dropout = self.training
-        self.mid_noise = AnnealedGaussianNoise(**mid_noise_kwargs)
+        self.mid_noise = GaussianNoise(sigma=mid_noise_sigma)
         self.is_update_mid_noise = self.training
 
     def forward(self, input_variable,
@@ -90,15 +90,15 @@ class Seq2seq(Module):
         self.is_update_mid_dropout = self.training
         self.is_update_mid_noise = self.training
 
-        last_enc_control_out = self._mid_noise(last_enc_control_out)
+        last_enc_control_out = self.mid_noise(last_enc_control_out)
         last_enc_control_out = self._mid_dropout(last_enc_control_out)
 
         if isinstance(encoder_hidden, tuple):
             # for lstm
-            encoder_hidden = tuple(self._mid_noise(el) for el in encoder_hidden)
+            encoder_hidden = tuple(self.mid_noise(el) for el in encoder_hidden)
             encoder_hidden = tuple(self._mid_dropout(el) for el in encoder_hidden)
         else:
-            encoder_hidden = self._mid_noise(encoder_hidden)
+            encoder_hidden = self.mid_noise(encoder_hidden)
             encoder_hidden = self._mid_dropout(encoder_hidden)
 
         (decoder_outputs,
@@ -118,11 +118,6 @@ class Seq2seq(Module):
     def _mid_dropout(self, x):
         x = self.mid_dropout(x, is_update=self.is_update_mid_dropout)
         self.is_update_mid_dropout = False  # makes sure that updates only once every forward
-        return x
-
-    def _mid_noise(self, x):
-        x = self.mid_noise(x, is_update=self.is_update_mid_noise)
-        self.is_update_mid_noise = False  # makes sure that updates only once every forward
         return x
 
     def extra_repr(self):
