@@ -653,16 +653,18 @@ class PositionAttention(Module):
 
             # adds either 0.75 or -0.75
             oscilating075 = (0.5 - (self.n_training_calls % 2)) * 3 / 2
+
             dict_mu_weights["rel_counter_decoder"
                             ] = (dict_mu_weights["rel_counter_decoder"] *
                                  interpolate_help(0.25, 1) +
                                  interpolate_help(oscilating075, 0))
+
             if self.is_bb_bias:
                 # adds either 0.125 or 0.875
                 dict_mu_weights["bias"
                                 ] = (dict_mu_weights["bias"] *
                                      interpolate_help(0.125, 1) +
-                                     interpolate_help(0.5 + oscilating075 / 2, 0))
+                                     interpolate_help(0.5 - oscilating075 / 2, 0))
 
             for l in self.bb_labels:
                 if l not in ["rel_counter_decoder", "bias"]:
@@ -685,7 +687,7 @@ class PositionAttention(Module):
         dict_mu_weights = dict(zip(self.bb_labels, mu_weights.unbind(-1)))
 
         # TO DO : REMOVE if not useful
-        self._initialization_helper_weights(dict_mu_weights)
+        dict_mu_weights = self._initialization_helper_weights(dict_mu_weights)
 
         # clamping
         if self.is_clamp_weights:
