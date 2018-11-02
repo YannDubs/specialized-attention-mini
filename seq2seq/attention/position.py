@@ -770,14 +770,13 @@ class PositionAttention(Module):
         """Generate sigma."""
         is_update_sigma = self.training and step == 0
 
+        current_min_sigma = self.get_sigma(is_update_sigma)
         if self.get_sigma.is_annealing:
-            current_min_sigma = self.get_sigma(is_update_sigma)
-
             # if you are still annealing min sigma then don't backprop
             # to sigma generator
             sigma = current_min_sigma + torch.zeros_like(mu)
         else:
-            unclamped_sigma = (self.get_sigma.final_value +
+            unclamped_sigma = (current_min_sigma +
                                self.sigma_generator(positioning_outputs))
             sigma = clamp(unclamped_sigma.unsqueeze(1),
                           minimum=self.min_sigma,
