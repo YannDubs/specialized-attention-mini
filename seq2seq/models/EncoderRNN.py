@@ -38,12 +38,14 @@ class EncoderRNN(BaseRNN):
     """
 
     def __init__(self, vocab_size, max_len, hidden_size, embedding_size,
+                 is_content_attn=True,
                  key_kwargs={},
                  value_kwargs={},
                  **kwargs):
         super(EncoderRNN, self).__init__(vocab_size, max_len, hidden_size,
                                          **kwargs)
         self.embedding_size = embedding_size
+        self.is_content_attn = is_content_attn
 
         self.embedding = nn.Embedding(vocab_size, embedding_size)
         self.controller, self.hidden0 = get_rnn(self.rnn_cell, self.embedding_size,
@@ -52,8 +54,9 @@ class EncoderRNN(BaseRNN):
                                                 is_get_hidden0=True,
                                                 **self.rnn_kwargs)
 
-        self.key_generator = KQGenerator(self.hidden_size, **key_kwargs)
-        self.key_size = self.key_generator.output_size
+        if self.is_content_attn:
+            self.key_generator = KQGenerator(self.hidden_size, **key_kwargs)
+            self.key_size = self.key_generator.output_size
 
         self.value_generator = ValueGenerator(self.hidden_size,
                                               embedding_size,
@@ -101,19 +104,22 @@ class EncoderRNN(BaseRNN):
         embedded = embedded_unpacked
         output, _ = nn.utils.rnn.pad_packed_sequence(output, batch_first=True)
 
-        keys = self.key_generator(output, step=0)
+        if self.is_content_attn:
+            keys = self.key_generator(output, step=0)
 
-        if "key_confuser" in confusers:
-            confuse_keys_queries(input_lengths_tensor,
-                                 keys,
-                                 confusers["key_confuser"],
-                                 self.enc_counter,
-                                 self.training)
+            if "key_confuser" in confusers:
+                confuse_keys_queries(input_lengths_tensor,
+                                     keys,
+                                     confusers["key_confuser"],
+                                     self.enc_counter,
+                                     self.training)
+
+            self.add_to_test(keys, "keys")
+        else:
+            keys = None
 
         values = self.value_generator(output, embedded)
 
         last_control_out = output[:, -1:, :]
-
-        self.add_to_test(keys, "keys")
 
         return keys, values, hidden, last_control_out

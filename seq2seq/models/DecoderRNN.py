@@ -132,10 +132,10 @@ class DecoderRNN(BaseRNN):
 
         if self.is_attention:
 
-            self.query_generator = KQGenerator(self.hidden_size, **query_kwargs)
-            self.query_size = self.query_generator.output_size
-
             if self.is_content_attn:
+                self.query_generator = KQGenerator(self.hidden_size, **query_kwargs)
+                self.query_size = self.query_generator.output_size
+
                 self.content_attention = ContentAttention(self.query_size,
                                                           **content_kwargs)
 
@@ -245,20 +245,21 @@ class DecoderRNN(BaseRNN):
                                      lengths, di, step_output, step_attn,
                                      additional=additional)
 
-        if "query_confuser" in confusers:
-            # SLOW FOR CUDA : 1 allocation per batch!!
-            output_lengths_tensor = torch.from_numpy(lengths).float().to(device)
-            queries = torch.cat(additional["queries"], dim=1)
+        if self.is_content_attn:
+            if "query_confuser" in confusers:
+                # SLOW FOR CUDA : 1 allocation per batch!!
+                output_lengths_tensor = torch.from_numpy(lengths).float().to(device)
+                queries = torch.cat(additional["queries"], dim=1)
 
-            confuse_keys_queries(output_lengths_tensor,
-                                 queries,
-                                 confusers["query_confuser"],
-                                 self.dec_counter,
-                                 self.training)
+                confuse_keys_queries(output_lengths_tensor,
+                                     queries,
+                                     confusers["query_confuser"],
+                                     self.dec_counter,
+                                     self.training)
 
-        if self.is_dev_mode:
-            queries = torch.cat(additional["queries"], dim=1).detach().cpu()
-            add_to_test(queries, "queries", ret_dict["test"], self.is_dev_mode)
+            if self.is_dev_mode:
+                queries = torch.cat(additional["queries"], dim=1).detach().cpu()
+                add_to_test(queries, "queries", ret_dict["test"], self.is_dev_mode)
 
         ret_dict[DecoderRNN.KEY_SEQUENCE] = sequence_symbols
         ret_dict[DecoderRNN.KEY_LENGTH] = lengths.tolist()
@@ -290,7 +291,7 @@ class DecoderRNN(BaseRNN):
                                if k in self.additional_to_store}
 
         if not is_multiple_call:
-            recursive_update(ret_dict, filtered_additional)
+            ret_dict = recursive_update(ret_dict, filtered_additional)
             # removes so that doesn't add them multiple time uselessly
             for k in filtered_additional.keys():
                 additional.pop(k, None)
@@ -436,13 +437,7 @@ class DecoderRNN(BaseRNN):
                          step, additional, confusers=dict()):
         source_lengths_list, source_lengths_tensor = format_source_lengths(source_lengths)
 
-        batch_size = keys.size(0)
-
-        query = self.query_generator(controller_output, step)
-
-        if "query_confuser" in confusers or self.is_dev_mode:
-            # need to have all queries together
-            additional["queries"] = additional.get("queries", []) + [query]
+        batch_size = values.size(0)
 
         unormalized_counter = self.rel_counter.expand(batch_size, -1, 1)
         rel_counter_encoder = renormalize_input_length(unormalized_counter,
@@ -450,6 +445,12 @@ class DecoderRNN(BaseRNN):
                                                        self.max_len - 1)
 
         if self.is_content_attn:
+            query = self.query_generator(controller_output, step)
+
+            if "query_confuser" in confusers or self.is_dev_mode:
+                # need to have all queries together
+                additional["queries"] = additional.get("queries", []) + [query]
+
             if step > 0:
                 mean_content_old = additional["mean_content"]
 

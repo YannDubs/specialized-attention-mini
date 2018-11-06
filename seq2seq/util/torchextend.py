@@ -428,7 +428,7 @@ class StochasticRounding(Module):
     def extra_repr(self):
         return get_extra_repr(self, always_shows=["start_step"])
 
-    def forward(self, x, is_update): # is_update just to use same syntax as concrete
+    def forward(self, x, is_update):  # is_update just to use same syntax as concrete
         if not self.training:
             return x.round()
 

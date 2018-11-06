@@ -168,7 +168,6 @@ class ValueGenerator(BaseKeyValueQuery):
 
         if self.is_highway:
             self.highway = Highway(self.used_input_size, self.output_size,
-                                   min_hidden=self.min_generator_hidden,
                                    **highway_kwargs)
 
         self.reset_parameters()

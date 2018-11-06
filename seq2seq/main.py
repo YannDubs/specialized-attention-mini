@@ -58,7 +58,7 @@ def get_seq2seq_model(src,
                       max_len,
                       total_training_calls,
                       is_mlps=True,
-                      embedding_size=128,
+                      embedding_size=64,
                       rnn_cell='gru',
                       hidden_size=128,
                       is_weight_norm=False,  # TO DO - medium: chose best and remove parameter + try layer normalization which should work better
@@ -71,9 +71,9 @@ def get_seq2seq_model(src,
                       is_single_carry=True,
                       is_additive_highway=True,   # TO DO - medium: chose best and remove parameter
                       is_add_all_controller=True,
-                      content_method='scalemult',  # see if scaledmult better
+                      content_method='scaledot',  # see if scaledmult better
                       is_content_attn=True,
-                      key_size=32,
+                      key_size=16,
                       value_size=-1,
                       is_contained_kv=False,
                       value_noise_sigma=0,
@@ -85,11 +85,15 @@ def get_seq2seq_model(src,
                       is_posrnn=True,
                       rate_init_help=0,
                       anneal_min_sigma=0.1,
+                      is_sample_pos_attn=False,
                       is_bb_bias=True,
-                      regularizations=["is_reg_clamp_mu", "is_l0_bb_weights", "is_reg_clamp_weights"],
+                      regularizations=["is_reg_clamp_mu",
+                                       "is_l0_bb_weights",
+                                       #"is_reg_clamp_weights", # DEBUG MODE
+                                       "is_reg_const_weights"],
                       lp_reg_weights=1,  # TO DO - medium: chose best and remove parameter
                       is_clamp_weights=True,  # TO DO - medium: chose best and remove parameter
-                      rate_start_round=0,
+                      rate_start_round=0.05,
                       anneal_temp_round=0.1,
                       rounder_weights="concrete",
                       rounder_mu="concrete",
@@ -99,7 +103,8 @@ def get_seq2seq_model(src,
                       rounder_perc="concrete",  # TO DO - medium: chose best and remove parameter
                       is_dev_mode=False,
                       is_viz_train=False,
-                      is_sample_pos_attn=False):  # TO DOC
+                      is_old_position=False  # DEBUG MODE
+                      ):
     """Return a initialized extrapolator model.
 
     Args:
@@ -189,6 +194,9 @@ def get_seq2seq_model(src,
             training calls, until it reaches the given `min_sigma`. This parameter
             defines the percentage of training calls before the mdoel should reach
             the final `min_sigma`.
+        is_sample_pos_attn (bool, optional): whether to sample from the positional
+            attention the word to attend to. This will force sigma to be smaller,
+            and might give better estimates of position confidence.
         is_building_blocks_mu (bool, optional): whether to use building blocks to
             generate the positional mu rather than using a normal MLP.
         is_bb_bias (bool, optional): adding a bias term to the building blocks.
@@ -213,9 +221,13 @@ def get_seq2seq_model(src,
                 useful as if the mu completely overshoots it will be hard for it to
                 come back to normal values if it needs to. It also makes sense to
                 output what you want rather than relying on postpropressing.
-            - "is_reg_round_weighs": whether to regularise with lp norm
-                the building block weights in order to push them towards integers.
-                This is the soft version of `rounder_weights`.
+            - "is_reg_clamp_weights": whether to regularise with lp norm the
+                clamping of the weights. I.e push the network to not overshoot
+                and really generate the desired weights rather than the clamped one.
+                This can be useful as if the weights completely overshoot it
+                will be hard for them to come back to normal values if it needs
+                to. It also makes sense to output what you want rather than
+                relying on postpropressing.
             - "is_reg_variance_weights": whether to use lp norm
                 regularisation to force the building blocks to have low variance
                 across time steps. This can be useful as it forces the model to use
@@ -309,10 +321,19 @@ def get_seq2seq_model(src,
                       annealed_noise_kwargs=kq_annealed_noise_kwargs,
                       sigma_noise=kq_noise_sigma)
 
+    # DEBUG MODE should not give this param
+    if is_old_position:
+        warnings.warn("Using the DEBUG mode `is_old_position` : overwriting regularizations.")
+        regularizations = ["is_reg_clamp_mu", "is_l0_bb_weights"]
+        min_hidden = 32
+    else:
+        min_hidden = 16
+
     highway_kwargs = dict(initial_highway=initial_highway,
                           is_single_carry=is_single_carry,
                           is_additive_highway=is_additive_highway,
-                          is_mlps=is_mlps)
+                          is_mlps=is_mlps,
+                          min_hidden=min_hidden)
 
     value_kwargs = dict(output_size=value_size,
                         is_contained_kv=is_contained_kv,
@@ -328,7 +349,8 @@ def get_seq2seq_model(src,
                          rnn_cell=rnn_cell,
                          is_weight_norm=is_weight_norm,
                          key_kwargs=key_kwargs,
-                         value_kwargs=value_kwargs)
+                         value_kwargs=value_kwargs,
+                         is_content_attn=is_content_attn)
 
     # Decoder
     query_kwargs = key_kwargs  # use the same parameters
@@ -345,6 +367,12 @@ def get_seq2seq_model(src,
     rounder_mu_kwargs = dict(name=rounder_mu)
     rounder_mu_kwargs.update(rounders_kwars[rounder_mu])
 
+    legal_reg = ["is_reg_clamp_weights", "is_reg_const_weights", "is_reg_old_weights",
+                 "is_reg_clamp_mu", "is_reg_variance_weights", "is_l0_bb_weights",
+                 "is_reg_pos_perc"]
+    for regularization in regularizations:
+        if regularization not in legal_reg:
+            raise ValueError("Unkown regularization: {}.".format(regularization))
     rnn_kwargs = dict(is_weight_norm=is_weight_norm)
     position_kwargs = dict(n_steps_prepare_pos=n_steps_prepare_pos,
                            n_steps_init_help=rate2steps(rate_init_help),
@@ -360,7 +388,8 @@ def get_seq2seq_model(src,
                            is_clamp_weights=is_clamp_weights,
                            rounder_weights_kwargs=rounder_weights_kwargs,
                            rounder_mu_kwargs=rounder_mu_kwargs,
-                           is_sample_attn=is_sample_pos_attn)
+                           is_sample_attn=is_sample_pos_attn,
+                           is_old=is_old_position)
 
     content_kwargs = dict(method=content_method)
 
@@ -449,6 +478,7 @@ def train(train_path,
           n_steps_interpolate_confuser=0.05,
           plateau_reduce_lr=[4, 0.5],
           _initial_model="initial_model",
+          is_old_position=False,  # DEBUG MODE
           **kwargs):
     """Trains the model given all parameters.
 
@@ -570,6 +600,7 @@ def train(train_path,
     seq2seq = get_seq2seq_model(src, tgt, max_len, total_training_calls,
                                 content_method=content_method,
                                 n_steps_prepare_pos=n_steps_prepare_pos,
+                                is_old_position=is_old_position,
                                 **kwargs)
 
     n_parameters = sum([p.numel() for p in seq2seq.parameters()])
@@ -582,7 +613,8 @@ def train(train_path,
 
     max_p_interpolators = dict()
     max_p_interpolators.update(get_regularizers_positioner(total_training_calls,
-                                                           n_steps_prepare_pos=n_steps_prepare_pos))
+                                                           n_steps_prepare_pos=n_steps_prepare_pos,
+                                                           is_old=is_old_position))
 
     losses, loss_weights = get_losses(loss_names, tgt, is_predict_eos,
                                       eos_weight=eos_weight,

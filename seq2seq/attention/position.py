@@ -23,7 +23,8 @@ from seq2seq.util.helpers import (renormalize_input_length, get_rnn,
                                   clamp, format_source_lengths, Rate2Steps,
                                   get_indices, regularization_loss, batch_reduction_f,
                                   clamp_regularize, HyperparameterCurriculumInterpolator,
-                                  mean)
+                                  mean,
+                                  HyperparameterInterpolator)  # DEBUG MODE
 from seq2seq.util.torchextend import (MLP, ConcreteRounding, ProbabilityConverter,
                                       AnnealedGaussianNoise, L0Gates, StochasticRounding)
 from seq2seq.util.initialization import replicate_hidden0, init_param, weights_init
@@ -32,44 +33,120 @@ from seq2seq.util.base import Module
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def get_regularizers_positioner(total_training_calls, n_steps_prepare_pos):
+# DEBUG MODE. SHould remove : _old_get_regularizers_positioner
+
+def _old_get_regularizers_positioner(total_training_calls, n_steps_prepare_pos):
+    rate2steps = Rate2Steps(total_training_calls)
+    max_p_interpolators = dict()
+    is_prepare_pos = n_steps_prepare_pos is not None
+
+    n_steps_interpolate = rate2steps(0.05)
+    start_step = n_steps_prepare_pos if is_prepare_pos else rate2steps(0.05)
+    max_p_interpolators["pos_const_weights"
+                        ] = HyperparameterInterpolator(5e-2, 1e-2, n_steps_interpolate,
+                                                       start_step=start_step,
+                                                       default=5e-2,
+                                                       mode="linear")
+
+    n_steps_interpolate = n_steps_prepare_pos if is_prepare_pos else rate2steps(0.05)
+    start_step = rate2steps(0)
+    max_p_interpolators["pos_old_weights"
+                        ] = HyperparameterInterpolator(5e-2, 0, n_steps_interpolate,
+                                                       start_step=start_step,
+                                                       default=1e-2,
+                                                       mode="linear")
+
+    n_steps_interpolate = rate2steps(0)
+    start_step = rate2steps(0)
+    max_p_interpolators["pos_clamp_mu"
+                        ] = HyperparameterInterpolator(5e-2, 5e-2, n_steps_interpolate,
+                                                       start_step=start_step,
+                                                       default=0,
+                                                       mode="linear")
+
+    n_steps_interpolate = rate2steps(0)
+    start_step = rate2steps(0)
+    max_p_interpolators["pos_clamp_weights"
+                        ] = HyperparameterInterpolator(5e-2, 5e-2, n_steps_interpolate,
+                                                       start_step=start_step,
+                                                       default=0,
+                                                       mode="linear")
+
+    n_steps_interpolate = rate2steps(0.3)
+    start_step = n_steps_prepare_pos if is_prepare_pos else rate2steps(0.05)
+    max_p_interpolators["pos_l0_weights"
+                        ] = HyperparameterInterpolator(3e-2, 5e-3, n_steps_interpolate,
+                                                       start_step=start_step,
+                                                       default=0,
+                                                       mode="linear")
+
+    n_steps_interpolate = n_steps_prepare_pos if is_prepare_pos else rate2steps(0.05)
+    start_step = rate2steps(0)
+    max_p_interpolators["pos_variance_weights"
+                        ] = HyperparameterInterpolator(0., 1e-2, n_steps_interpolate,
+                                                       start_step=start_step,
+                                                       default=0,
+                                                       mode="linear")
+
+    n_steps_interpolate = rate2steps(0.3)
+    start_step = rate2steps(0)
+    max_p_interpolators["mix_%_pos"
+                        ] = HyperparameterInterpolator(5e-2, 1e-2, n_steps_interpolate,
+                                                       start_step=start_step,
+                                                       default=0,
+                                                       mode="linear")
+
+    return max_p_interpolators
+
+
+def get_regularizers_positioner(total_training_calls, n_steps_prepare_pos, is_old=False):
     def _initialize_regularizer(name, curriculum, **kwargs):
         max_p_interpolators[name] = HyperparameterCurriculumInterpolator(curriculum, **kwargs)
+
+    if is_old:
+        return _old_get_regularizers_positioner(total_training_calls, n_steps_prepare_pos)
 
     max_p_interpolators = dict()
 
     _initialize_regularizer("pos_const_weights",
-                            [dict(step=n_steps_prepare_pos, value=5e-2, mode="geometric"),
-                             dict(step=int(n_steps_prepare_pos * 3 / 2), value=1e-4, mode="geometric"),
-                             dict(step=n_steps_prepare_pos * 2, value=1e-2)])
+                            [dict(step=100, value=5e-1),
+                             dict(step=int(n_steps_prepare_pos * 3 / 2), value=5e-2),
+                             dict(step=n_steps_prepare_pos * 2, value=0),
+                             dict(step=n_steps_prepare_pos * 3, value=1e-2)])
+    """
+    _initialize_regularizer("pos_const_weights",
+                            [dict(step=100, value=5e-1),
+                             dict(step=int(n_steps_prepare_pos * 3 / 2), value=1e-2),
+                             dict(step=n_steps_prepare_pos * 3, value=1e-1)])
+    """
 
     _initialize_regularizer("pos_old_weights",
-                            [dict(step=0, value=5e-2, mode="linear"),
+                            [dict(step=0, value=5e-2),
                              dict(step=n_steps_prepare_pos, value=0)])
 
     _initialize_regularizer("pos_clamp_weights",
-                            [dict(step=0, value=5e-3, mode="linear"),
+                            [dict(step=0, value=5e-3),
                              dict(step=n_steps_prepare_pos, value=5e-2)])
 
     _initialize_regularizer("pos_l0_weights",
-                            [dict(step=n_steps_prepare_pos * 3, value=0, mode="linear"),
-                             dict(step=n_steps_prepare_pos * 6, value=3e-2, mode="geometric"),
-                             dict(step=n_steps_prepare_pos * 9, value=1e-2)])
+                            [dict(step=n_steps_prepare_pos, value=0),
+                             dict(step=n_steps_prepare_pos * 2, value=3e-2),
+                             dict(step=n_steps_prepare_pos * 4, value=0),
+                             dict(step=n_steps_prepare_pos * 6, value=1e-2)])
 
     _initialize_regularizer("pos_variance_weights",
-                            [dict(step=n_steps_prepare_pos, value=5e-3, mode="linear"),
+                            [dict(step=n_steps_prepare_pos, value=5e-3),
                              dict(step=n_steps_prepare_pos * 2, value=0)])
 
     _initialize_regularizer("pos_clamp_mu",
-                            [dict(step=0, value=5e-3, mode="linear"),
+                            [dict(step=0, value=5e-3),
                              dict(step=n_steps_prepare_pos, value=5e-2)])
 
     # don't use a name starting with `pos_%` because later I look for losses
     # starting with `pos_` and it means it only apply to positioing attention
     # while this ones applies to mixing the attention
     _initialize_regularizer("mix_%_pos",
-                            [dict(step=0, value=0, mode="linear"),
-                             dict(step=n_steps_prepare_pos, value=5e-2, mode="geometric"),
+                            [dict(step=n_steps_prepare_pos, value=5e-2, mode="linear"),
                              dict(step=n_steps_prepare_pos * 3, value=5e-3)])
 
     return max_p_interpolators
@@ -195,6 +272,9 @@ class PositionAttention(Module):
         lp_reg_weights (bool, optional): the p in the lp norm to use for all the
             regularisation above. p can be in [0,”inf”]. If `p=0` will use some
             approximation to the l0 norm.
+        is_sample_attn (bool, optional): whether to sample from the attention the
+            word to attend to. This will force sigma to be smaller, and might give
+            better estimates of position confidence.
     """
 
     def __init__(self, decoder_output_size, max_len, n_steps_prepare_pos,
@@ -207,7 +287,9 @@ class PositionAttention(Module):
                  rnn_kwargs={},
                  is_bb_bias=True,  # TO DO: remove this parameter (i.e force True)
                  is_content_attn=True,
-                 regularizations=["is_reg_clamp_mu", "is_l0_bb_weights"],
+                 regularizations=["is_reg_clamp_mu",
+                                  "is_l0_bb_weights",
+                                  "is_reg_clamp_weights"],
                  is_clamp_weights=True,  # TO DO - medium: chose best and remove parameter
                  rounder_weights_kwargs={},
                  rounder_mu_kwargs={},
@@ -215,8 +297,14 @@ class PositionAttention(Module):
                  min_sigma=0.41,
                  initial_sigma=5.0,
                  lp_reg_weights=1,
-                 is_sample_attn=False):  # TO DOC
+                 is_sample_attn=False,  # TO DOC
+                 is_old=False):  # DEBUG MODE
         super(PositionAttention, self).__init__()
+
+        self.is_old = is_old
+        if self.is_old:
+            is_sample_attn = False
+            n_steps_init_help = 0
 
         self.n_steps_prepare_pos = n_steps_prepare_pos
         self.n_steps_init_help = n_steps_init_help
@@ -274,6 +362,9 @@ class PositionAttention(Module):
                                                      dtype=torch.float,
                                                      device=device) / n_building_blocks_mu
 
+        if self.is_old:
+            self.expected_mu_weights_init = 0
+
         if self.is_recurrent:
             self.rnn, self.hidden0 = get_rnn(rnn_cell, input_size, hidden_size,
                                              batch_first=True,
@@ -301,14 +392,16 @@ class PositionAttention(Module):
         self.rounder_weights = _get_rounder(**rounder_weights_kwargs)
         self.rounder_mu = _get_rounder(**rounder_mu_kwargs)
 
+        initial_gates = 0 if self.is_old else 1
+
         if self.is_l0_bb_weights:
             rounding_kwargs = dict(n_steps_interpolate=self.n_steps_prepare_pos)
             self.linear_l0_weights = L0Gates(hidden_size, n_building_blocks_mu,
                                              is_at_least_1=True,
-                                             initial_gates=1,
+                                             initial_gates=initial_gates,
                                              rounding_kwargs=rounding_kwargs)
 
-        self.mean_attns_discounting_factor = Parameter(torch.tensor(0.0))
+        self.mean_attns_discounting_factor = Parameter(torch.tensor(0.))
 
         if self.is_sample_attn:
             self.temperature = 0.999
@@ -394,6 +487,10 @@ class PositionAttention(Module):
 
         pos_confidence = self._sigma_to_conf(sigma)
 
+        self.add_to_visualize([mu, sigma, pos_confidence], ["mu", "sigma", "pos_confidence"])
+
+        self.add_to_test([mu, sigma], ["mu", "sigma"])
+
         # need to take relative sigma after sigma_to_conf because not fair if
         # the confidence depends on the length of the sequence.
         # Should be in `_compute_parameters` but needed the raw sigma to compute
@@ -406,23 +503,19 @@ class PositionAttention(Module):
 
         # slow because list comprehension : should optimize
         pos_attn = pad_sequence([self.positioner(rel_counter_encoder[i_batch, :length, :],
-                                                 mu[i_batch].squeeze(),
-                                                 sigma[i_batch].squeeze())
+                                                 mu[i_batch, ...].squeeze(),
+                                                 sigma[i_batch, ...].squeeze())
                                  for i_batch, length in enumerate(source_lengths_list)],
                                 batch_first=True)
 
         # new size = (batch, n_queries, n_keys)
         pos_attn = pos_attn.transpose(2, 1)
 
-        if self.training and self.is_sample_attn and self.n_training_calls > self.n_steps_prepare_pos:
+        if self.training and self.is_sample_attn and self.n_training_calls > self.n_steps_prepare_pos * 2:
             self.temperature = max(0.5, self.temperature**1.005)
             soft_onehot = torch.distributions.RelaxedOneHotCategorical(self.temperature,
                                                                        probs=pos_attn)
             pos_attn = soft_onehot.rsample()
-
-        self.add_to_visualize([mu, sigma, pos_confidence], ["mu", "sigma", "pos_confidence"])
-
-        self.add_to_test([mu, sigma], ["mu", "sigma"])
 
         return pos_attn, pos_confidence, mu, sigma, additional
 
@@ -503,7 +596,6 @@ class PositionAttention(Module):
             or when using recurrent positioning attention as it needs to give the
             last `positioner_hidden`.
         """
-
         (positioning_outputs,
          additional) = self._compute_positioning_outputs(positioning_inputs,
                                                          step,
@@ -528,7 +620,7 @@ class PositionAttention(Module):
         sigma = self._generate_sigma(positioning_outputs, mu, step)
         sigma = self._initialization_helper_sigma(sigma)
 
-        self.add_to_test([raw_mu_weights, mu_weights, building_blocks],
+        self.add_to_test([raw_mu_weights, mu_weights, building_blocks, gates],
                          ['raw_mu_weights', 'mu_weights', 'building_blocks'])
 
         self.add_to_visualize([mu_weights, building_blocks],
@@ -561,6 +653,7 @@ class PositionAttention(Module):
             if self.is_regularize:
                 self.add_regularization_loss("pos_l0_weights", loss)
 
+            self.add_to_visualize(gates.sum(-1).mean(), "gates")
             self.add_to_test(gates, "bb_gates")
         else:
             gates = None
@@ -596,27 +689,31 @@ class PositionAttention(Module):
 
         return gates
 
+    def _init_bias(self, x, bias, start_amplitude=0.9, end_amplitude=0):
+        def interpolate_help(start, end):
+            delta = (end - start) * interpolating_factor
+            return start + delta
+
+        interpolating_factor = (self.n_training_calls - 1) / self.n_steps_init_help
+        x = ((bias * interpolate_help(start_amplitude, end_amplitude) +
+              x * interpolate_help(1 - start_amplitude, 1 - end_amplitude)))
+
+        return x
+
     def _initialization_helper_gates(self, gates):
         """
         Transforms the weights accosicated with the building blocks
         during the initial training steps, in order to help it converging
         at the right position.
         """
-        def interpolate_help(start, end):
-            delta = (end - start) * interpolating_factor
-            return start + delta
-
-        if (self.is_l0_bb_weights and self.training and
-                self.n_training_calls < self.n_steps_init_help):
-
-            interpolating_factor = (self.n_training_calls - 1) / self.n_steps_init_help
+        if (self.is_l0_bb_weights and self.n_training_calls < self.n_steps_init_help):
 
             new_gates = torch.zeros_like(gates)
-            new_gates[:, self.bb_labels.index("bias")] = 1.
+            # 0 when gates init as 0
+            new_gates[:, self.bb_labels.index("bias")] = self.n_training_calls % 2
             new_gates[:, self.bb_labels.index("rel_counter_decoder")] = 1.
 
-            gates = (new_gates * interpolate_help(0.5, 0) +
-                     gates * interpolate_help(0.5, 1))
+            gates = self._init_bias(gates, new_gates)
 
         return gates
 
@@ -625,16 +722,9 @@ class PositionAttention(Module):
         Transforms the sigma during the initial training steps, in order to help
         it converging at the right position.
         """
-        def interpolate_help(start, end):
-            delta = (end - start) * interpolating_factor
-            return start + delta
-
-        if self.training and self.n_training_calls < self.n_steps_init_help:
-            interpolating_factor = (self.n_training_calls - 1) / self.n_steps_init_help
-
+        if self.n_training_calls < self.n_steps_init_help:
             # use a very small sigma at the begining as we "are showing where to attend to"
-            sigma = (self.min_sigma * interpolate_help(0.9, 0) +
-                     sigma * interpolate_help(0.1, 1))
+            sigma = self._init_bias(sigma, self.min_sigma)
 
         return sigma
 
@@ -644,32 +734,23 @@ class PositionAttention(Module):
         during the initial training steps, in order to help it converging
         at the right position.
         """
-        def interpolate_help(start, end):
-            delta = (end - start) * interpolating_factor
-            return start + delta
-
-        if self.training and self.n_training_calls < self.n_steps_init_help:
-            interpolating_factor = (self.n_training_calls - 1) / self.n_steps_init_help
-
-            # adds either 0.75 or -0.75
-            oscilating075 = (0.5 - (self.n_training_calls % 2)) * 3 / 2
-
+        if self.n_training_calls < self.n_steps_init_help:
+            oscilating1 = (0.5 - (self.n_training_calls % 2)) * 2
             dict_mu_weights["rel_counter_decoder"
-                            ] = (dict_mu_weights["rel_counter_decoder"] *
-                                 interpolate_help(0.25, 1) +
-                                 interpolate_help(oscilating075, 0))
+                            ] = self._init_bias(dict_mu_weights["rel_counter_decoder"],
+                                                oscilating1)
 
             if self.is_bb_bias:
-                # adds either 0.125 or 0.875
+                # want to be 1 when oscilating1
+                oscilating01 = oscilating1 / 2 - 0.5
                 dict_mu_weights["bias"
-                                ] = (dict_mu_weights["bias"] *
-                                     interpolate_help(0.125, 1) +
-                                     interpolate_help(0.5 - oscilating075 / 2, 0))
+                                ] = self._init_bias(dict_mu_weights["bias"],
+                                                    oscilating01)
 
             for l in self.bb_labels:
                 if l not in ["rel_counter_decoder", "bias"]:
                     # at the start use mostly bias and rel_counter_decoder
-                    dict_mu_weights[l] = dict_mu_weights[l] * interpolate_help(0.1, 1)
+                    dict_mu_weights[l] = self._init_bias(dict_mu_weights[l], 0)
 
         return dict_mu_weights
 
@@ -778,7 +859,7 @@ class PositionAttention(Module):
             # to sigma generator
             sigma = current_min_sigma + torch.zeros_like(mu)
         else:
-            unclamped_sigma = (current_min_sigma +
+            unclamped_sigma = (self.get_sigma.final_value +
                                self.sigma_generator(positioning_outputs))
             sigma = clamp(unclamped_sigma.unsqueeze(1),
                           minimum=self.min_sigma,
