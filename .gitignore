@@ -1,3 +1,5 @@
+
+
 # directories
 venv*/
 .DS_Store
@@ -5,6 +7,9 @@ venv*/
 tutorial-reports
 __pycache__
 
+.vscode
+dist/
+build/
 
 # files
 ..gitignore.icloud
