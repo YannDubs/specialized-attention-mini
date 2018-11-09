@@ -72,6 +72,7 @@ class DecoderRNN(BaseRNN):
                  value_size=None,
                  is_content_attn=True,
                  is_position_attn=True,
+                 is_query=True,
                  content_kwargs={},
                  position_kwargs={},
                  query_kwargs={},
@@ -87,6 +88,8 @@ class DecoderRNN(BaseRNN):
         self.output_size = vocab_size
         self.eos_id = eos_id
         self.sos_id = sos_id
+        
+        self.is_query = is_query
 
         self.is_add_all_controller = is_add_all_controller
         self.value_size = value_size
@@ -131,11 +134,15 @@ class DecoderRNN(BaseRNN):
                                   **self.rnn_kwargs)
 
         if self.is_attention:
-
-            if self.is_content_attn:
+            
+            if self.is_query:
                 self.query_generator = KQGenerator(self.hidden_size, **query_kwargs)
                 self.query_size = self.query_generator.output_size
+            else:
+                self.query_size = self.hidden_size
+                # self.query_generator = None
 
+            if self.is_content_attn:
                 self.content_attention = ContentAttention(self.query_size,
                                                           **content_kwargs)
 
@@ -445,10 +452,14 @@ class DecoderRNN(BaseRNN):
                                                        self.max_len - 1)
 
         if self.is_content_attn:
-            query = self.query_generator(controller_output, step)
+
+            if self.is_query:
+                query = self.query_generator(controller_output, step)
+            else: 
+                query = controller_output
 
             if "query_confuser" in confusers or self.is_dev_mode:
-                # need to have all queries together
+                    # need to have all queries together
                 additional["queries"] = additional.get("queries", []) + [query]
 
             if step > 0:

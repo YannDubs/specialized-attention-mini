@@ -39,6 +39,8 @@ class EncoderRNN(BaseRNN):
 
     def __init__(self, vocab_size, max_len, hidden_size, embedding_size,
                  is_content_attn=True,
+                 is_key=True,
+                 is_value=True,
                  key_kwargs={},
                  value_kwargs={},
                  **kwargs):
@@ -46,6 +48,9 @@ class EncoderRNN(BaseRNN):
                                          **kwargs)
         self.embedding_size = embedding_size
         self.is_content_attn = is_content_attn
+        
+        self.is_value = is_value
+        self.is_key = is_key
 
         self.embedding = nn.Embedding(vocab_size, embedding_size)
         self.controller, self.hidden0 = get_rnn(self.rnn_cell, self.embedding_size,
@@ -54,14 +59,23 @@ class EncoderRNN(BaseRNN):
                                                 is_get_hidden0=True,
                                                 **self.rnn_kwargs)
 
-        if self.is_content_attn:
+        if not self.is_content_attn and (self.is_key or self.is_query):
+            self.is_key = False
+            self.is_query = False
+
+        if self.is_key:
             self.key_generator = KQGenerator(self.hidden_size, **key_kwargs)
             self.key_size = self.key_generator.output_size
+        else:
+            self.key_size = self.hidden_size
 
-        self.value_generator = ValueGenerator(self.hidden_size,
-                                              embedding_size,
-                                              **value_kwargs)
-        self.value_size = self.value_generator.output_size
+        if self.is_value:
+            self.value_generator = ValueGenerator(self.hidden_size,
+                                                  embedding_size,
+                                                  **value_kwargs)
+            self.value_size = self.value_generator.output_size
+        else:
+            self.value_size = self.hidden_size
 
         self.enc_counter = torch.arange(1, self.max_len + 1,
                                         dtype=torch.float,
@@ -103,22 +117,25 @@ class EncoderRNN(BaseRNN):
 
         embedded = embedded_unpacked
         output, _ = nn.utils.rnn.pad_packed_sequence(output, batch_first=True)
-
-        if self.is_content_attn:
+    
+        if self.is_key:
             keys = self.key_generator(output, step=0)
-
-            if "key_confuser" in confusers:
-                confuse_keys_queries(input_lengths_tensor,
-                                     keys,
-                                     confusers["key_confuser"],
-                                     self.enc_counter,
-                                     self.training)
-
-            self.add_to_test(keys, "keys")
         else:
-            keys = None
+            keys = output
 
-        values = self.value_generator(output, embedded)
+        if "key_confuser" in confusers:
+            confuse_keys_queries(input_lengths_tensor,
+                                 keys,
+                                 confusers["key_confuser"],
+                                 self.enc_counter,
+                                 self.training)
+
+        self.add_to_test(keys, "keys")
+       
+        if self.is_value:
+            values = self.value_generator(output, embedded)
+        else:
+            values = output
 
         last_control_out = output[:, -1:, :]
 

@@ -103,7 +103,10 @@ def get_seq2seq_model(src,
                       rounder_perc="concrete",  # TO DO - medium: chose best and remove parameter
                       is_dev_mode=False,
                       is_viz_train=False,
-                      is_old_position=False  # DEBUG MODE
+                      is_old_position=False,  # DEBUG MODE
+                      is_key=True,
+                      is_value=True,
+                      is_query=True
                       ):
     """Return a initialized extrapolator model.
 
@@ -206,10 +209,10 @@ def get_seq2seq_model(src,
         regularizations (list of str, optional): list of regularizations to use.
             Possible regularizations Are explained below :
             - "is_reg_const_weights" : whether to use a lp regularization
-                on the constant position mu building block. This can be usefull in
-                otrder to push the network to use non constant building blocks that are
+                on the constant position mu building block. This can be useful in
+                order to push the network to use non constant building blocks that are
                 more extrapolable (i.e with constants, the network has to make varying
-                weights which is not interpretable. If the blocks ae varying then
+                weights which is not interpretable. If the blocks are varying then
                 the "hard" extrapolable output would already be done for the network).
             - "is_reg_old_weights": whether to use a lp norm regularisation
                 on the building blocks that depend on previous positioning attention.
@@ -306,6 +309,13 @@ def get_seq2seq_model(src,
         is_viz_train (bool, optional): whether to save how the averages of some
             intepretable variables change during training in "visualization"
             of `additional`.
+        is_key (bool, optional): whether or not to use Key in KVQ. 
+            This is automatically not possible if content attention is disabled
+        is_value (bool, optional):  whether or not to use Value in KVQ. In that case
+            the context vector does not actually represent the context but the result
+            of the content attention mixed with positional attention 
+        is_query (bool, optional): whether or not to use Query in KVQ. 
+            This is automatically not possible if content attention is disabled
     """
     assert max_len > 1, "Max len has to be greater than 1"
 
@@ -348,6 +358,8 @@ def get_seq2seq_model(src,
                          input_dropout_p=dropout_input_encoder,
                          rnn_cell=rnn_cell,
                          is_weight_norm=is_weight_norm,
+                         is_value=is_value,
+                         is_key=is_key,                      
                          key_kwargs=key_kwargs,
                          value_kwargs=value_kwargs,
                          is_content_attn=is_content_attn)
@@ -416,6 +428,7 @@ def get_seq2seq_model(src,
                          value_size=encoder.value_size,
                          is_content_attn=is_content_attn,
                          is_position_attn=is_position_attn,
+                         is_query=is_query,
                          content_kwargs=content_kwargs,
                          position_kwargs=position_kwargs,
                          query_kwargs=query_kwargs,
