@@ -66,8 +66,7 @@ class Seq2seq(Module):
     def forward(self, input_variable,
                 input_lengths=None,
                 target_variables=None,
-                teacher_forcing_ratio=0,
-                confusers=dict()):
+                teacher_forcing_ratio=0):
 
         self._update_n_training_calls()
 
@@ -84,8 +83,7 @@ class Seq2seq(Module):
             target_output = None
 
         keys, values, encoder_hidden, last_enc_control_out = self.encoder(input_variable,
-                                                                          input_lengths,
-                                                                          confusers=confusers)
+                                                                          input_lengths)
 
         self.is_update_mid_dropout = self.training
         self.is_update_mid_noise = self.training
@@ -106,8 +104,7 @@ class Seq2seq(Module):
          ret_dict) = self.decoder(encoder_hidden, keys, values, last_enc_control_out,
                                   inputs=target_output,
                                   teacher_forcing_ratio=teacher_forcing_ratio,
-                                  source_lengths=input_lengths,
-                                  confusers=confusers)
+                                  source_lengths=input_lengths)
 
         ret_dict["test"].update(self.get_to_test())
         ret_dict["visualize"].update(self.get_to_visualize())

@@ -23,14 +23,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
-from seq2seq.attention import (ContentAttention, PositionAttention, AttentionMixer,
-                               KQGenerator, ValueGenerator)
+from seq2seq.attention import Attender
 from seq2seq.util.helpers import (renormalize_input_length, get_rnn,
                                   get_extra_repr, format_source_lengths,
                                   recursive_update, add_to_test)
 from seq2seq.util.torchextend import AnnealedGaussianNoise
 from seq2seq.util.initialization import weights_init, init_param
-from seq2seq.util.confuser import confuse_keys_queries
 from .baseRNN import BaseRNN
 
 
@@ -47,18 +45,8 @@ class DecoderRNN(BaseRNN):
         hidden_size (int): the number of features in the hidden state `h`
         sos_id (int): index of the start of sentence symbol
         eos_id (int): index of the end of sentence symbol
-        is_add_all_controller (bool, optional): whether to add all computed features
-            to the decoder in order to have a central model that "knows everything".
         values_size (int, optional): size of the generated value. -1 means same
             as hidden size. Can also give percentage of hidden size betwen 0 and 1.
-        is_content_attn (bool, optional): whether to use content attention.
-        is_position_attn (bool, optional): whether to use positional attention.
-        content_kwargs (dict, optional): additional arguments to the content
-            attention generator.
-        position_kwargs (dict, optional): additional arguments to the positional
-            attention generator.
-        query_kwargs (dict, optional): additional arguments to the query generator.
-        attmix_kwargs (dict, optional): additional arguments to the attention mixer.
         _additional_to_store (list): keys from `additional` that should be
             stored in `ret_dict` if present.
     """
@@ -68,19 +56,13 @@ class DecoderRNN(BaseRNN):
     KEY_SEQUENCE = 'sequence'
 
     def __init__(self, vocab_size, max_len, hidden_size, embedding_size, sos_id, eos_id,
-                 is_add_all_controller=True,
                  value_size=None,
-                 is_content_attn=True,
-                 is_position_attn=True,
-                 content_kwargs={},
-                 position_kwargs={},
-                 query_kwargs={},
-                 attmix_kwargs={},
+                 attender=Attender,
+                 attender_kwargs={},
                  _additional_to_store=["test", "visualize", "losses", "pos_perc"],
                  **kwargs):
 
-        super(DecoderRNN, self).__init__(vocab_size, max_len, hidden_size,
-                                         **kwargs)
+        super().__init__(vocab_size, max_len, hidden_size, **kwargs)
         self.additional_to_store = _additional_to_store
 
         self.embedding_size = embedding_size
@@ -88,31 +70,9 @@ class DecoderRNN(BaseRNN):
         self.eos_id = eos_id
         self.sos_id = sos_id
 
-        self.is_add_all_controller = is_add_all_controller
         self.value_size = value_size
-        self.is_position_attn = is_position_attn
-        self.is_content_attn = is_content_attn
-
-        self.is_attention = is_content_attn or is_position_attn
 
         input_rnn_size = self.embedding_size + self.value_size
-        input_prediction_size = self.hidden_size
-
-        n_additional_controller_features = 0
-
-        # TO DO : all of this should be getters in the attention class.
-        # i.e psoition attention should have a method `get_n_additional_features`
-        # and initalize things like `self.pos_confidence0`
-        if self.is_add_all_controller:
-            n_additional_controller_features += 3  # abs_counter_decoder / rel_counter_decoder / source_len
-            if self.is_attention:
-                n_additional_controller_features += 1  # mean_attn_old
-            if self.is_content_attn:
-                n_additional_controller_features += 2  # mean_content_old / content_confidence_old
-            if self.is_position_attn:
-                n_additional_controller_features += 4  # mu_old / sigma_old / mean_attn_olds / pos_confidence_old
-            if self.is_content_attn and self.is_position_attn:
-                n_additional_controller_features += 1  # position_perc_old
 
         self.rel_counter = torch.arange(0, self.max_len,
                                         dtype=torch.float,
@@ -123,52 +83,20 @@ class DecoderRNN(BaseRNN):
                                         device=device)
 
         self.embedding = nn.Embedding(self.output_size, self.embedding_size)
-        self.controller = get_rnn(self.rnn_cell,
-                                  input_rnn_size + n_additional_controller_features,
+        self.controller = get_rnn("gru",
+                                  input_rnn_size,
                                   self.hidden_size,
                                   batch_first=True,
-                                  is_get_hidden0=False,
-                                  **self.rnn_kwargs)
+                                  is_get_hidden0=False)
 
-        if self.is_attention:
+        self.attender = attender(self.hidden_size, self.max_len, **attender_kwargs)
 
-            if self.is_content_attn:
-                self.query_generator = KQGenerator(self.hidden_size, **query_kwargs)
-                self.query_size = self.query_generator.output_size
-
-                self.content_attention = ContentAttention(self.query_size,
-                                                          **content_kwargs)
-
-            if self.is_position_attn:
-                self.position_attention = PositionAttention(self.hidden_size,
-                                                            self.max_len,
-                                                            is_content_attn=self.is_content_attn,
-                                                            **position_kwargs)
-
-            if self.is_content_attn and self.is_position_attn:
-                self.mix_attention = AttentionMixer(self.hidden_size, **attmix_kwargs)
-
-        self.out = nn.Linear(input_prediction_size, self.output_size)
+        self.out = nn.Linear(self.hidden_size, self.output_size)
 
         self.reset_parameters()
 
-    def reset_parameters(self):
-        super().reset_parameters()
-
-        if self.is_add_all_controller:
-            if self.is_attention:
-                self.mean_attn0 = Parameter(torch.tensor(0.5))
-            if self.is_content_attn:
-                self.mean_content0 = Parameter(torch.tensor(0.5))
-                self.content_confidence0 = Parameter(torch.tensor(0.5))
-            if self.is_position_attn:
-                self.pos_confidence0 = Parameter(torch.tensor(0.5))
-
     def extra_repr(self):
-        return get_extra_repr(self,
-                              conditional_shows=["is_content_attn",
-                                                 "is_position_attn",
-                                                 "is_add_all_controller"])
+        pass
 
     def forward(self,
                 encoder_hidden,
@@ -178,12 +106,10 @@ class DecoderRNN(BaseRNN):
                 inputs=None,
                 teacher_forcing_ratio=0,
                 source_lengths=None,
-                additional=None,
-                confusers=dict()):
+                additional=None):
 
         ret_dict = dict()
-        if self.is_attention:
-            ret_dict[DecoderRNN.KEY_ATTN_SCORE] = list()
+        ret_dict[DecoderRNN.KEY_ATTN_SCORE] = list()
 
         inputs, batch_size, max_length = self._validate_args(inputs, encoder_hidden,
                                                              teacher_forcing_ratio)
@@ -217,16 +143,13 @@ class DecoderRNN(BaseRNN):
             (decoder_output,
              decoder_hidden,
              step_attn,
-             controller_output,
-             additional) = self.forward_step(decoder_input,
-                                             decoder_hidden,
-                                             keys,
-                                             values,
-                                             controller_output,
-                                             di,
-                                             additional=additional,
-                                             source_lengths=source_lengths,
-                                             confusers=confusers)
+             controller_output) = self.forward_step(decoder_input,
+                                                    decoder_hidden,
+                                                    keys,
+                                                    values,
+                                                    controller_output,
+                                                    di,
+                                                    source_lengths=source_lengths)
 
             step_output = decoder_output.squeeze(1)
 
@@ -244,22 +167,6 @@ class DecoderRNN(BaseRNN):
                                      sequence_symbols,
                                      lengths, di, step_output, step_attn,
                                      additional=additional)
-
-        if self.is_content_attn:
-            if "query_confuser" in confusers:
-                # SLOW FOR CUDA : 1 allocation per batch!!
-                output_lengths_tensor = torch.from_numpy(lengths).float().to(device)
-                queries = torch.cat(additional["queries"], dim=1)
-
-                confuse_keys_queries(output_lengths_tensor,
-                                     queries,
-                                     confusers["query_confuser"],
-                                     self.dec_counter,
-                                     self.training)
-
-            if self.is_dev_mode:
-                queries = torch.cat(additional["queries"], dim=1).detach().cpu()
-                add_to_test(queries, "queries", ret_dict["test"], self.is_dev_mode)
 
         ret_dict[DecoderRNN.KEY_SEQUENCE] = sequence_symbols
         ret_dict[DecoderRNN.KEY_LENGTH] = lengths.tolist()
@@ -327,8 +234,7 @@ class DecoderRNN(BaseRNN):
         """
 
         decoder_outputs.append(step_output)
-        if self.is_attention:
-            ret_dict[DecoderRNN.KEY_ATTN_SCORE].append(step_attn)
+        ret_dict[DecoderRNN.KEY_ATTN_SCORE].append(step_attn)
 
         additional, ret_dict = self._store_additional(additional, ret_dict,
                                                       is_multiple_call=True)
@@ -346,9 +252,7 @@ class DecoderRNN(BaseRNN):
 
     def forward_step(self, input_var, hidden, keys, values,
                      controller_output, step,
-                     source_lengths=None,
-                     additional=None,
-                     confusers=dict()):
+                     source_lengths=None):
         """
         Performs one or multiple forward decoder steps.
 
@@ -381,20 +285,9 @@ class DecoderRNN(BaseRNN):
                                               keys,
                                               values,
                                               source_lengths,
-                                              step,
-                                              additional,
-                                              confusers=confusers)
+                                              step)
 
         controller_input = self._combine_context(embedded, context)
-
-        if self.is_add_all_controller:
-            additional_controller_features = self._get_additional_controller_features(additional,
-                                                                                      step,
-                                                                                      source_lengths_tensor)
-
-            controller_input = torch.cat([controller_input] +
-                                         additional_controller_features,
-                                         dim=2)
 
         controller_output, hidden = self.controller(controller_input, hidden)
 
@@ -403,7 +296,7 @@ class DecoderRNN(BaseRNN):
         predicted_softmax = F.log_softmax(self.out(prediction_input),
                                           dim=1).view(batch_size, output_len, -1)
 
-        return predicted_softmax, hidden, attn, controller_output, additional
+        return predicted_softmax, hidden, attn, controller_output
 
     def _validate_args(self, inputs, encoder_hidden, teacher_forcing_ratio):
         # inference batch size
@@ -434,7 +327,7 @@ class DecoderRNN(BaseRNN):
         return inputs, batch_size, max_length
 
     def _compute_context(self, controller_output, keys, values, source_lengths,
-                         step, additional, confusers=dict()):
+                         step):
         source_lengths_list, source_lengths_tensor = format_source_lengths(source_lengths)
 
         batch_size = values.size(0)
@@ -444,84 +337,16 @@ class DecoderRNN(BaseRNN):
                                                        source_lengths_tensor - 1,
                                                        self.max_len - 1)
 
-        if self.is_content_attn:
-            query = self.query_generator(controller_output, step)
+        attn = self.attender(keys, controller_output, source_lengths, step,
+                             controller=controller_output)
 
-            if "query_confuser" in confusers or self.is_dev_mode:
-                # need to have all queries together
-                additional["queries"] = additional.get("queries", []) + [query]
-
-            if step > 0:
-                mean_content_old = additional["mean_content"]
-
-            content_attn, content_confidence = self.content_attention(query, keys, step)
-            attn = content_attn
-
-            additional["content_confidence"] = content_confidence
-            additional["mean_content"] = torch.bmm(content_attn,
-                                                   rel_counter_encoder[:,
-                                                                       :content_attn.size(2),
-                                                                       :]
-                                                   ).squeeze(2)
-
-            self.add_to_visualize([content_confidence, additional["mean_content"]],
-                                  ["content_confidence", "mean_content"])
-            self.add_to_test(content_attn, "content_attention")
-
-        if self.is_position_attn:
-            if step == 0:
-                mean_attn_old = self.mean_attn0.expand(batch_size, 1)
-            else:
-                mean_attn_old = additional["mean_attn"]
-
-            mean_content_old = additional["mean_content"]
-
-            (pos_attn, pos_confidence,
-             mu, sigma, additional) = self.position_attention(controller_output,
-                                                              source_lengths,
-                                                              step,
-                                                              additional["mu"],
-                                                              additional["sigma"],
-                                                              mean_content_old,
-                                                              mean_attn_old,
-                                                              additional["mean_attn_olds"],
-                                                              additional)
-
-            additional["mu"] = mu
-            additional["sigma"] = sigma
-            additional["pos_confidence"] = pos_confidence
-
-            attn = pos_attn
-
-            self.add_to_test(pos_attn, "position_attention")
-
-        if self.is_content_attn and self.is_position_attn:
-            # mix attention should get all losses
-            regularization_losses = (self.get_regularization_losses()
-                                     if self.is_regularize else None)
-            attn, pos_perc = self.mix_attention(controller_output,
-                                                step,
-                                                content_attn,
-                                                content_confidence,
-                                                pos_attn,
-                                                pos_confidence,
-                                                additional["position_percentage"],
-                                                additional,
-                                                regularization_losses=regularization_losses)
-
-            additional["position_percentage"] = pos_perc
-
-            self.add_to_test(pos_confidence, "pos_confidence")
-            if self.mix_attention.mode != "pos_conf":
-                self.add_to_test(content_confidence, "content_confidence")
-
-        additional["mean_attn"] = torch.bmm(attn,
-                                            rel_counter_encoder[:, :attn.size(2), :]
-                                            ).squeeze(2)
+        mean_attn = torch.bmm(attn,
+                              rel_counter_encoder[:, :attn.size(2), :]
+                              ).squeeze(2)
 
         context = torch.bmm(attn, values)
 
-        self.add_to_visualize([additional["mean_attn"], step],
+        self.add_to_visualize([mean_attn, step],
                               ["mean_attn", "step"])
 
         return context, attn
@@ -530,82 +355,9 @@ class DecoderRNN(BaseRNN):
         if additional is None:
             additional = dict()
 
-        if self.is_position_attn:
-            if self.position_attention.is_recurrent:
-                additional['positioner_hidden'] = None
-
-            for k in ["mu", "sigma", "mean_attn", "mean_content", "position_percentage", "mean_attn_olds"]:
-                additional[k] = None
-
         return additional
 
     def _combine_context(self, input_var, context):
         combined_input = torch.cat((context, input_var), dim=2)
 
         return combined_input
-
-    def _get_additional_controller_features(self, additional, step, source_lengths_tensor):
-        batch_size = len(source_lengths_tensor)
-        additional_features = []
-
-        unormalized_counter = self.rel_counter[step:step + 1].expand(batch_size, 1)
-        rel_counter_decoder = renormalize_input_length(unormalized_counter,
-                                                       source_lengths_tensor - 1,
-                                                       self.max_len - 1
-                                                       ).unsqueeze(1)
-
-        abs_counter_decoder = self.rel_counter[step:step + 1].expand(batch_size, 1
-                                                                     ).unsqueeze(1)
-        abs_counter_decoder = abs_counter_decoder * (self.max_len - 1)
-
-        source_len = source_lengths_tensor.unsqueeze(-1).unsqueeze(-1)
-
-        additional_features.extend([source_len, rel_counter_decoder, abs_counter_decoder])
-
-        if self.is_attention:
-            if step != 0:
-                mean_attn_old = additional["mean_attn"].unsqueeze(1)
-            else:
-                mean_attn_old = self.mean_attn0.expand(batch_size, 1).unsqueeze(1)
-
-            additional_features.append(mean_attn_old)
-
-            if self.is_content_attn:
-                if step != 0:
-                    mean_content_old = additional["mean_content"].unsqueeze(1)
-                    content_confidence_old = additional["content_confidence"].unsqueeze(1)
-                else:
-                    mean_content_old = self.mean_content0.expand(batch_size, 1
-                                                                 ).unsqueeze(1)
-                    content_confidence_old = self.content_confidence0.expand(batch_size, 1
-                                                                             ).unsqueeze(1)
-
-                additional_features.extend([mean_content_old, content_confidence_old])
-
-            if self.is_position_attn:
-                if step != 0:
-                    mu_old = additional["mu"]
-                    sigma_old = additional["sigma"]
-                    mean_attn_olds = additional["mean_attn_olds"]
-                    pos_confidence_old = additional["pos_confidence"].unsqueeze(1)
-                else:
-                    mu_old = self.position_attention.mu0.expand(batch_size, 1
-                                                                ).unsqueeze(1)
-                    sigma_old = self.position_attention.sigma0.expand(batch_size, 1
-                                                                      ).unsqueeze(1)
-                    mean_attn_olds = mean_attn_old
-                    pos_confidence_old = self.pos_confidence0.expand(batch_size, 1
-                                                                     ).unsqueeze(1)
-
-                additional_features.extend([mu_old, sigma_old, mean_attn_olds, pos_confidence_old])
-
-            if self.is_content_attn and self.is_position_attn:
-                if step != 0:
-                    position_perc_old = additional["position_percentage"].unsqueeze(1)
-                else:
-                    position_perc_old = self.mix_attention.position_perc0.expand(batch_size, 1
-                                                                                 ).unsqueeze(1)
-
-                additional_features.extend([position_perc_old])
-
-        return additional_features

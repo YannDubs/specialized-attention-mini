@@ -29,6 +29,7 @@ class Module(abc.ABC, nn.Module):
         self._to_visualize = dict()
         self._to_test = dict()
         self._regularization_losses = dict()
+        self.storer = dict()
         self.n_training_calls = 0
         self.set_dev_mode(value=is_dev_mode)
         self.set_viz_train(value=is_viz_train)
@@ -92,6 +93,11 @@ class Module(abc.ABC, nn.Module):
         self.n_training_calls = 0
         for child in self.children():
             child.apply(weights_init)
+
+        self._to_visualize = dict()
+        self._to_test = dict()
+        self._regularization_losses = dict()
+        self.storer = dict()
 
         self.is_resetted = True
 

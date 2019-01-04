@@ -12,8 +12,7 @@ import torch.nn as nn
 from seq2seq.util.initialization import get_hidden0, weights_init, replicate_hidden0
 from seq2seq.util.helpers import renormalize_input_length, get_rnn, get_extra_repr
 from seq2seq.util.base import Module
-from seq2seq.util.torchextend import (MLP, ProbabilityConverter,
-                                      AnnealedGaussianNoise, Highway, GaussianNoise)
+from seq2seq.util.torchextend import (MLP, AnnealedGaussianNoise, Highway, GaussianNoise)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -153,7 +152,7 @@ class ValueGenerator(BaseKeyValueQuery):
         super(ValueGenerator, self).__init__(input_size, **kwargs)
 
         if is_highway and embedding_size != self.output_size:
-            warnings.warn("Using value_size == {} instead of {} bcause highway.".format(embedding_size, self.output_size))
+            warnings.warn("Using value_size == {} instead of {} because highway.".format(embedding_size, self.output_size))
             self.output_size = embedding_size
             self.used_input_size = self._compute_used_input_size()
 
@@ -161,14 +160,14 @@ class ValueGenerator(BaseKeyValueQuery):
 
         if self.is_mlps:
             self.generator = MLP(self.used_input_size,
-                                 self.min_generator_hidden,
-                                 self.output_size)
+                                 self.output_size,
+                                 hidden_size=self.min_generator_hidden)
         else:
             self.generator = nn.Linear(self.used_input_size, self.output_size)
 
         if self.is_highway:
             self.highway = Highway(self.used_input_size, self.output_size,
-                                   **highway_kwargs)
+                                   save_name="value_gates", **highway_kwargs)
 
         self.reset_parameters()
 
@@ -204,6 +203,6 @@ class ValueGenerator(BaseKeyValueQuery):
         values = self.noise_output(values)
 
         if self.is_highway:
-            values = self.highway(input_generator, embedded, values)
+            values = self.highway(values, embedded, input_generator)
 
         return values

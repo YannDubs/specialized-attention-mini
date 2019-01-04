@@ -331,7 +331,7 @@ class NLLLoss(Loss):
                                       self._INPUTS,
                                       self._TARGETS,
                                       nn.NLLLoss(ignore_index=ignore_index,
-                                                 size_average=size_average,
+                                                 reduction='elementwise_mean' if size_average else 'none',
                                                  **kwargs),
                                       total_training_calls=total_training_calls,
                                       max_p_interpolators=max_p_interpolators)

@@ -77,12 +77,25 @@ def clamp_regularize(x, **kwargs):
     Clamps a tensor to the given [minimum, maximum] (leaky) bound, with
     an optional hard clamping. And computes a loss proportional to the clamping.
     """
-    x_old = x.clone()
+    x_old = x.detach()
     x = clamp(x, **kwargs)
     loss = batch_reduction_f(x - x_old,
                              torch.norm,
                              p=2)
     return x, loss
+
+
+def leaky_noisy_clamp(x, minimum, maximum, **kwargs):
+    """
+    Clamps a tensor to the given [minimum, maximum] (leaky) bound, with
+    an optional hard clamping. And generates noise when outside of bounds.
+    """
+    outside = (x < minimum) | (x > maximum)
+    if outside.sum() > 0:
+        outside = outside.float()
+        x = clamp(x, minimum=minimum, maximum=maximum, is_leaky=True, **kwargs)
+        x = x * (1 - outside) + outside * outside.normal_() * x
+    return x
 
 
 def identity(x):

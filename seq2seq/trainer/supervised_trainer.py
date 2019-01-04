@@ -25,6 +25,8 @@ from seq2seq.util.helpers import mean, HyperparameterInterpolator
 
 import math
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 
 class SupervisedTrainer(object):
     """ The SupervisedTrainer class helps in setting up a training framework in a
@@ -100,15 +102,14 @@ class SupervisedTrainer(object):
         self.logger = logging.getLogger(__name__)
 
     def _train_batch(self, input_variable, input_lengths, target_variable,
-                     model, confusers=dict()):
+                     model):
         loss = self.loss
 
         # Forward propagation
         decoder_outputs, decoder_hidden, other = model(input_variable,
                                                        input_lengths,
                                                        target_variable,
-                                                       teacher_forcing_ratio=self.teacher_forcing(True),
-                                                       confusers=confusers)
+                                                       teacher_forcing_ratio=self.teacher_forcing(True))
 
         losses = self.evaluator.compute_batch_loss(decoder_outputs,
                                                    decoder_hidden,
@@ -144,9 +145,6 @@ class SupervisedTrainer(object):
         self.optimizer.step()
         model.zero_grad()
 
-        for name, confuser in confusers.items():
-            confuser(additional=other, name=name)
-
         model.zero_grad()
 
         return losses, other
@@ -154,8 +152,7 @@ class SupervisedTrainer(object):
     def _train_epoches(self, data, model, n_epochs, start_epoch, start_step,
                        dev_data=None,
                        monitor_data=[],
-                       top_k=5,
-                       confusers=dict()):
+                       top_k=5):
 
         log = self.logger
         others = dict()
@@ -165,7 +162,6 @@ class SupervisedTrainer(object):
         epoch_loss_avg = defaultdict(float)
         print_loss_avg = defaultdict(float)
 
-        device = None if torch.cuda.is_available() else -1
         batch_iterator = torchtext.data.BucketIterator(
             dataset=data, batch_size=self.batch_size,
             sort=False, sort_within_batch=True,
@@ -231,8 +227,7 @@ class SupervisedTrainer(object):
                 losses, other_single_batch = self._train_batch(input_variables,
                                                                input_lengths.tolist(),
                                                                target_variables,
-                                                               model,
-                                                               confusers=confusers)
+                                                               model)
 
                 # # # DEV MODE # # #
                 if "visualize" in other_single_batch and len(other_single_batch["visualize"]) != 0:
@@ -363,8 +358,7 @@ class SupervisedTrainer(object):
               checkpoint_path=None,
               top_k=5,
               optimizer_kwargs={"max_grad_norm": 5},
-              is_oneshot=False,
-              confusers=dict()):
+              is_oneshot=False):
         """ Run training for a given model.
 
         Args:
@@ -419,8 +413,7 @@ class SupervisedTrainer(object):
                                     start_epoch, step,
                                     dev_data=dev_data,
                                     monitor_data=monitor_data,
-                                    top_k=top_k,
-                                    confusers=confusers)
+                                    top_k=top_k)
         return model, self.history, other
 
     @staticmethod
