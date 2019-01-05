@@ -196,6 +196,8 @@ class Module(abc.ABC, nn.Module):
             loss (tensor): value of the loss to add.
         """
         assert self.is_regularize
+        if (loss < 0).any():  # DEV MODE
+            print(loss_name, loss)
         self._regularization_losses[loss_name] = loss
 
     def get_regularization_losses(self, is_reset=True):

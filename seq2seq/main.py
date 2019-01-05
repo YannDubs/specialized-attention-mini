@@ -96,7 +96,6 @@ def get_seq2seq_model(src,
                       is_dev_mode=False,
                       is_viz_train=False,
                       attender="attender",
-                      is_leaky_noisy_clamp=False,  # DEV MODE
                       is_l0_bb_weights=True,  # DEV MODE
                       is_reg_clamp_mu=True,  # DEV MODE
                       gating="custom",  # DEV MODE
@@ -256,7 +255,6 @@ def get_seq2seq_model(src,
     rounder_weights_kwargs.update(rounders_kwars[rounder_weights])
 
     mu_kwargs = dict(rounder_mu_kwargs=rounder_mu_kwargs,
-                     is_leaky_noisy_clamp=is_leaky_noisy_clamp,
                      is_l0_bb_weights=is_l0_bb_weights,
                      is_reg_clamp_mu=is_reg_clamp_mu,
                      rounder_weights_kwargs=rounder_weights_kwargs)
@@ -335,7 +333,7 @@ def train(train_path,
           is_attnloss=False,
           eos_weight=1,
           anneal_eos_weight=0,  # TO DO : hyperparmeter optimize
-          _initial_eos_weight=0.05,
+          _initial_eos_weight=0.,
           content_method='scaledot',
           is_amsgrad=True,  # TO DO - medium : chose best valeu and delete param
           rate_prepare_pos=0.05,
@@ -475,8 +473,10 @@ def train(train_path,
         loss_weight_updater = LossWeightUpdater(indices=[tgt.eos_id],
                                                 initial_weights=[_initial_eos_weight],
                                                 final_weights=[eos_weight],
-                                                n_steps_interpolates=[n_steps_interpolate_eos_weight],
-                                                modes=["geometric"])
+                                                n_steps_interpolates=[0],
+                                                # n_steps_interpolates=[n_steps_interpolate_eos_weight],
+                                                modes=["linear"],
+                                                start_steps=[n_steps_interpolate_eos_weight])  # DEV MODE
     else:
         loss_weight_updater = None
 

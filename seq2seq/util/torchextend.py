@@ -627,8 +627,8 @@ class L0Gates(Module):
         if self.is_at_least_1:
             # correct only if no loss weight
             loss = loss - 1. / gates.size(-1)
-            # pealize alse if less than 1 but less
-            loss = torch.relu(loss) + torch.relu(-loss / 10)
+            # penalize also if less than 1 but less
+            loss = torch.relu(loss) + torch.relu(-loss / 3)
 
         return gates, loss
 
@@ -743,9 +743,9 @@ def get_gate(gating, *args, **kwargs):
     elif gating == "residual":
         return res_gate
     elif gating == "highway":
-        return Highway(*args, is_additive_highway=False, **kwargs)
+        return Highway(*args, is_additive_highway=False, is_round=True, **kwargs)
     elif gating == "custom":
-        return Highway(*args, is_additive_highway=True, **kwargs)
+        return Highway(*args, is_additive_highway=True, is_round=False, **kwargs)
     else:
         ValueError("Unkown `gating={}`".format(gating))
 
@@ -838,14 +838,6 @@ class PlateauAct(Module):
                                 negative_slope=self.negative_slope)
                 inside = inside.float()
                 out = inside * out + (1 - inside) * clamped
-
-                """ # DEV MODE
-                loss = batch_reduction_f(out - out.detach(),
-                                         torch.norm,
-                                         p=2)
-
-                self.add_regularization_loss("pos_clamp_mu", loss)
-                """
 
         return out
 

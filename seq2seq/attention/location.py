@@ -21,7 +21,8 @@ from torch.nn.utils.rnn import pad_sequence
 from seq2seq.util.helpers import (renormalize_input_length, get_rnn, get_extra_repr,
                                   clamp, format_source_lengths, leaky_noisy_clamp,
                                   clamp_regularize, HyperparameterInterpolator,
-                                  HyperparameterCurriculumInterpolator)
+                                  HyperparameterCurriculumInterpolator, get_indices,
+                                  regularization_loss, batch_reduction_f)
 from seq2seq.util.torchextend import get_rounder, L0Gates, get_gate, PlateauAct
 from seq2seq.util.initialization import replicate_hidden0
 from seq2seq.util.base import Module
@@ -36,14 +37,15 @@ def get_regularizers_location(total_training_calls, n_steps_prepare_pos):
     max_p_interpolators = dict()
 
     _initialize_regularizer("pos_l0_weights",
-                            [dict(step=n_steps_prepare_pos * 2, value=0),
-                             dict(step=n_steps_prepare_pos * 4, value=5e-3),
-                             dict(step=n_steps_prepare_pos * 6, value=0),
-                             dict(step=n_steps_prepare_pos * 8, value=1e-3)])
+                            [dict(step=int(n_steps_prepare_pos / 10), value=0),
+                             dict(step=n_steps_prepare_pos, value=5e-3)])
 
     _initialize_regularizer("pos_clamp_mu",
-                            [dict(step=0, value=5e-3),
-                             dict(step=n_steps_prepare_pos, value=5e-2)])
+                            [dict(step=0, value=5e-2)])
+
+    _initialize_regularizer("pos_const_weights",
+                            [dict(step=int(n_steps_prepare_pos / 10), value=5e-2),
+                             dict(step=n_steps_prepare_pos, value=1e-3)])
 
     return max_p_interpolators
 
@@ -422,7 +424,6 @@ class MuGenerator(Module):
                  is_add_old_attn=True,
                  rounder_mu_kwargs={},
                  rounder_weights_kwargs={},
-                 is_leaky_noisy_clamp=False,  # DEV MODE
                  ):
 
         super().__init__()
@@ -433,8 +434,6 @@ class MuGenerator(Module):
         self.is_reg_clamp_mu = is_reg_clamp_mu
         self.is_add_content = is_add_content
         self.is_add_old_attn = is_add_old_attn
-
-        self.is_leaky_noisy_clamp = is_leaky_noisy_clamp
 
         # Building blocks
         self.single_step = torch.tensor(1. / (self.max_len - 1)).to(device)
@@ -453,15 +452,16 @@ class MuGenerator(Module):
 
         self.rounder_weights = get_rounder(**rounder_weights_kwargs)
 
+        self.acti_plat_int = PlateauAct(plateaus="int")
+
         if self.rounder_weights is None:
             self.acti_plat_diag = PlateauAct(plateaus=[-1, 1]
                                              if self.is_l0_bb_weights else [-1, 0, 1],
-                                             len_plateaus=2e-1)
-            self.acti_plat_step = PlateauAct(plateaus="int")
+                                             len_plateaus=5e-1)
             self.acti_plat_bias = PlateauAct(plateaus=[-0.5, 0.5]
                                              if self.is_l0_bb_weights else [-0.5, 0, 0.5],
-                                             len_plateaus=2e-1)
-            self.acti_plat = PlateauAct(plateaus=[0, 1], len_plateaus=2e-1)
+                                             len_plateaus=3e-1)
+            self.acti_plat = PlateauAct(plateaus=[0, 1], len_plateaus=3e-1)
 
         if self.is_l0_bb_weights:
             self.loss_weights = torch.ones(self.n_building_blocks, device=device)
@@ -475,6 +475,12 @@ class MuGenerator(Module):
                                              rounding_kwargs=rounding_kwargs)
 
         self.rounder_mu = get_rounder(**rounder_mu_kwargs)
+
+        if self.is_reg_clamp_mu:
+            self.get_clamping_eps = HyperparameterInterpolator(0.1,
+                                                               0.01,
+                                                               self.n_steps_prepare_pos,
+                                                               mode="linear")
 
         self.rel_counter = torch.arange(0, self.max_len,
                                         dtype=torch.float,
@@ -500,6 +506,9 @@ class MuGenerator(Module):
 
         self.weights = torch.tensor(weights)
         self.old_weights0 = Parameter(self.weights)
+
+        if self.is_reg_clamp_mu:
+            self.get_clamping_eps.reset_parameters()
 
         super().reset_parameters()
 
@@ -563,7 +572,7 @@ class MuGenerator(Module):
         if self.rounder_weights is not None:  # DEV MODE
             assert self.is_l0_bb_weights
             for i, l in enumerate(self.bb_labels):
-                is_update = (step == 0 and i == 0)
+                is_update = (self.training and step == 0 and i == 0)
                 if l == "diagonal":
                     dict_mu_weights[l] = clamp(dict_mu_weights[l], minimum=-1., maximum=1)
                     dict_mu_weights[l] = self.rounder_weights((dict_mu_weights[l] + 1) / 2,
@@ -586,13 +595,22 @@ class MuGenerator(Module):
                 if l == "diagonal":
                     dict_mu_weights[l] = self.acti_plat_diag(dict_mu_weights[l])
                 elif l == "single_step":
-                    dict_mu_weights[l] = self.acti_plat_step(dict_mu_weights[l])
+                    dict_mu_weights[l] = self.acti_plat_int(dict_mu_weights[l])
                 elif l == "bias":
                     dict_mu_weights[l] = self.acti_plat_bias(dict_mu_weights[l])
                 elif l in ["mu_old", "mean_content_attn", "mean_attn_old"]:
                     dict_mu_weights[l] = self.acti_plat(dict_mu_weights[l])
                 else:
                     raise ValueError("Unkown label={}".format(l))
+
+        # regularizes single step
+        if self.is_regularize:
+            loss = batch_reduction_f(regularization_loss(dict_mu_weights["single_step"],
+                                                         p=1,
+                                                         dim=-1,
+                                                         min_x=1.),
+                                     torch.mean)
+            self.add_regularization_loss("pos_const_weights", loss)
 
         ordered_weights = [dict_mu_weights[l] for l in self.bb_labels]
         mu_weights = torch.stack(ordered_weights, dim=2)
@@ -625,22 +643,33 @@ class MuGenerator(Module):
             mu (torch.FloatTensor): mean location attention. Shape:
                 (batch_size, n_queries, 1).
         """
+        is_update = self.training and step == 0
 
+        normalizer = (source_lengths_tensor - 1).unsqueeze(1).unsqueeze(1)
         if self.rounder_mu is not None:
             # rounding to words
-            normalizer = (source_lengths_tensor - 1).unsqueeze(1).unsqueeze(1)
             mu = self.rounder_mu((mu + 0.5) * normalizer,
-                                 is_update=(step == 0)
+                                 is_update=is_update
                                  ) / normalizer - 0.5
+        else:  # DEV MODE
+            # plateau activation to words
+            mu = self.acti_plat_int((mu + 0.5) * normalizer) / normalizer - 0.5
 
-        clamp_mu_kwargs = dict(minimum=-0.5, maximum=0.5, is_leaky=True)
-        if self.is_leaky_noisy_clamp:
-            mu = leaky_noisy_clamp(mu, -0.5, 0.5)
-        elif self.is_regularize and self.is_reg_clamp_mu:
-            mu, loss = clamp_regularize(mu, **clamp_mu_kwargs)
+        if self.is_regularize and self.is_reg_clamp_mu:
+            eps = self.get_clamping_eps(is_update)
+            delta = 0.01
+            mu, loss = clamp_regularize(mu,
+                                        negative_slope=0.1,
+                                        minimum=-(0.5 + delta),
+                                        maximum=0.5 + delta,
+                                        is_leaky=True,
+                                        reg_kwargs=dict(p=1, min_x=eps))
             self.add_regularization_loss("pos_clamp_mu", loss)
         else:
-            mu = clamp(mu, **clamp_mu_kwargs)
+            mu = clamp(mu,
+                       minimum=-0.5,
+                       maximum=0.5,
+                       is_leaky=True)
 
         return mu
 

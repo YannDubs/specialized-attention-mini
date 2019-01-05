@@ -9,7 +9,7 @@ from torch.nn.utils.rnn import pad_sequence
 
 from seq2seq.util.helpers import (renormalize_input_length, get_rnn, get_extra_repr,
                                   clamp, format_source_lengths,
-                                  clamp_regularize, HyperparameterInterpolator)
+                                  HyperparameterInterpolator)
 from seq2seq.util.torchextend import get_rounder, L0Gates
 from seq2seq.util.initialization import replicate_hidden0
 from seq2seq.util.base import Module

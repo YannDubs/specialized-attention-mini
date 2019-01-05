@@ -72,17 +72,24 @@ class Clamper:
                      hard_min=self.hard_min, hard_max=self.hard_max)
 
 
-def clamp_regularize(x, **kwargs):
+def clamp_regularize(x, is_leaky=False, reg_kwargs={}, **kwargs):
     """
     Clamps a tensor to the given [minimum, maximum] (leaky) bound, with
     an optional hard clamping. And computes a loss proportional to the clamping.
     """
-    x_old = x.detach()
-    x = clamp(x, **kwargs)
-    loss = batch_reduction_f(x - x_old,
-                             torch.norm,
-                             p=2)
-    return x, loss
+    x_clamped = clamp(x, is_leaky=is_leaky, **kwargs)
+
+    if is_leaky:
+        x_clamped_noleak = clamp(x, is_leaky=False, **kwargs)
+    else:
+        x_clamped_noleak = x_clamped
+
+    loss = batch_reduction_f(regularization_loss(x - x_clamped_noleak.detach(),
+                                                 is_no_mean=True,
+                                                 **reg_kwargs),
+                             torch.mean)
+
+    return x_clamped, loss
 
 
 def leaky_noisy_clamp(x, minimum, maximum, **kwargs):
@@ -530,12 +537,20 @@ def l0_loss(x, temperature=10, is_leaky=True, negative_slope=0.01, dim=None,
         return norm.mean(dim=dim, keepdim=keepdim)
 
 
-def regularization_loss(x, p=2., dim=None, lower_bound=1e-4, is_no_mean=False, **kwargs):
+def regularization_loss(x,
+                        min_x=0.,
+                        p=2.,
+                        dim=None,
+                        lower_bound=1e-4,
+                        is_no_mean=False,
+                        **kwargs):
     """Compute the regularization loss.
 
     Args:
         p (float, optional): element wise power to apply. All of those have been
             made differentiable (even `p=0`).
+        min_x (float, optional): if `abs(x)<min_x` then don't regularize.
+            Always positive.
         dim (int, optional): the dimension to reduce. By default flattens `x`
             then reduces to a scalar.
         lower_bound (float, optional): lower bounds the absolute value of a entry
@@ -545,6 +560,10 @@ def regularization_loss(x, p=2., dim=None, lower_bound=1e-4, is_no_mean=False, *
         kwargs:
             Additional parameters to `l0_norm`.
     """
+    if min_x > 0:
+        to_reg = (torch.abs(x) >= min_x).float()
+        x = x * to_reg
+
     if p < 1:
         x = abs_clamp(x, lower_bound)
 

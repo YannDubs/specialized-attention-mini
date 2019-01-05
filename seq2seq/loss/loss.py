@@ -39,8 +39,6 @@ def get_losses(loss_names, tgt, is_predict_eos, eos_weight=None, **kwargs):
     tgt (TargetField): target field.
     is_predict_eos (bool, optional): whether the mdoel has to predict the <eos>
         token.
-    is_predict_eos (bool, optional): whether the mdoel has to predict the <eos>
-        token.
     eos_weight (int, optional): weight of the loss that should be given to the
         <eos> token.
     """
@@ -77,18 +75,23 @@ class LossWeightUpdater:
     """
 
     def __init__(self, indices, initial_weights, final_weights, n_steps_interpolates,
-                 modes="geometric"):
+                 start_steps=0, modes="linear"):
         self.updaters = dict()
 
         if isinstance(modes, str):
             modes = [modes] * len(indices)
 
-        zips = zip(indices, final_weights, initial_weights, n_steps_interpolates, modes)
-        for index, final_weight, initial_weight, n_steps_interpolate, mode in zips:
+        if isinstance(start_steps, int):
+            start_steps = [start_steps] * len(indices)
+
+        zips = zip(indices, final_weights, initial_weights, n_steps_interpolates, modes, start_steps)
+        for index, final_weight, initial_weight, n_steps_interpolate, mode, start_step in zips:
             self.updaters[index] = HyperparameterInterpolator(initial_weight,
                                                               final_weight,
                                                               n_steps_interpolate,
-                                                              mode)
+                                                              default=0,
+                                                              mode=mode,
+                                                              start_step=start_step)
 
     def reset_parameters(self):
         """Reset the updater."""
