@@ -44,6 +44,9 @@ class LocationOnlyAttender(Module):
             mechanism for generated values. `None` no gating. `"residual"` adds
             the new value to the previous. `"highway"` gating using convex
             combination. `"custom"` gates the previous value and add the new one.
+        is_sample_attn (bool, optional): whether to sample from the attention the
+            word to attend to. This will force sigma to be smaller, and might give
+            better estimates of position confidence.
         sigma_kwargs (dictionary, optional): additional arguments to the
             `SigmaGenerator`.
         mu_kwargs (dictionary, optional): additional arguments to the
@@ -55,7 +58,8 @@ class LocationOnlyAttender(Module):
                  pdf="gaussian",
                  Generator=nn.Linear,
                  hidden_size=64,
-                 gating="custom",
+                 gating="gated_res",
+                 is_sample_attn=False,  # DEV MODE
                  sigma_kwargs={},
                  mu_kwargs={}):
         super().__init__()
@@ -65,6 +69,7 @@ class LocationOnlyAttender(Module):
         self.n_steps_prepare_pos = n_steps_prepare_pos
         self.pdf = pdf
         self.gating = gating
+        self.is_sample_attn = is_sample_attn
 
         self.rel_counter = torch.arange(0, self.max_len,
                                         dtype=torch.float,
@@ -92,6 +97,9 @@ class LocationOnlyAttender(Module):
                                               **sigma_kwargs)
 
         self.pdf = get_loc_pdf(pdf)
+
+        if self.is_sample_attn:
+            self.temperature = 0.999
 
         self.reset_parameters()
 
@@ -136,6 +144,12 @@ class LocationOnlyAttender(Module):
         loc_attn = self._compute_attn(mu, sigma, source_lengths)
 
         self.add_to_test([loc_attn], ["loc_attention"])
+
+        if self.training and self.is_sample_attn and self.n_training_calls > self.n_steps_prepare_pos * 2:
+            self.temperature = max(0.5, self.temperature**1.005)
+            soft_onehot = torch.distributions.RelaxedOneHotCategorical(self.temperature,
+                                                                       probs=loc_attn)
+            loc_attn = soft_onehot.rsample()
 
         return loc_attn
 

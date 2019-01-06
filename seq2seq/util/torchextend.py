@@ -115,14 +115,14 @@ class ProbabilityConverter(Module):
         fix_point (tuple, optional): tuple (x,y) which defines a fix point of
             the probability converter. With a fix_point, can only use a temperature
             parameter but not a bias. This is only possible with `activation="hard-sigmoid"`.
-        plateau_eps (float, optional): if proba is at less than `plateau_eps`
+        plateau_eps (float, optional): if proba is less than `plateau_eps`
             next to 0 or 1 then round the forward pass (but keep back pass).
             Note that this is done after bounding the proba with `min_p` and
             `plateau_eps` should thus be larger than `min_p`.
     """
 
     def __init__(self,
-                 min_p=0.001,
+                 min_p=0.,
                  activation="sigmoid",
                  is_temperature=False,
                  is_bias=False,
@@ -428,7 +428,10 @@ class StochasticRounder(Module):
     def extra_repr(self):
         return get_extra_repr(self, always_shows=["start_step"])
 
-    def forward(self, x, is_update):  # is_update just to use same syntax as concrete
+    def forward(self, x,
+                is_update=False,  # is_update just to use same syntax as concrete
+                idcs_to_round=None):
+
         if not self.training:
             return x.round()
 
@@ -442,6 +445,11 @@ class StochasticRounder(Module):
         x_hard = x_floored + torch.bernoulli(p)
         x_delta = x_hard - x_detached
         x_rounded = x_delta + x
+
+        if idcs_to_round is not None:
+            idcs_to_round = idcs_to_round.float()
+            x_rounded = x_rounded * idcs_to_round + (1 - idcs_to_round) * x
+
         return x_rounded
 
 
@@ -507,7 +515,7 @@ class ConcreteRounder(Module):
         txt += ", " + interpolator_txt
         return txt
 
-    def forward(self, x, is_update=True):
+    def forward(self, x, is_update=True, idcs_to_round=None):
         if not self.training:
             return x.round()
 
@@ -529,6 +537,11 @@ class ConcreteRounder(Module):
         # hapens to make the variable rounded. I.e the total is still differentiable
         new_decimals = new_d_detached.round() - new_d_detached + soft_sample
         x_rounded = x_floored + new_decimals - x_detached + x
+
+        if idcs_to_round is not None:
+            idcs_to_round = idcs_to_round.float()
+            x_rounded = x_rounded * idcs_to_round + (1 - idcs_to_round) * x
+
         return x_rounded
 
 
@@ -566,7 +579,9 @@ class L0Gates(Module):
         is_at_least_1 (bool, optional): only start regularizing if more than one
             gate is 1.
         bias (bool, optional): whether to use a bias for the gate generation.
-        is_mlp (bool, optional): whether to use a MLP for the gate generation.
+        Generator (Module, optional): module to generate various values. It
+            should be callable using `Generator(input_size, output_size)(x)`.
+            By default `nn.Linear`.
         initial_gates (float or list, optional): initial expected sum of gates
             to use. If scalar then simply adds `initial_gate/n_gates` to each.
             If vector then specify the inital expected gate for every gate.
@@ -579,8 +594,9 @@ class L0Gates(Module):
     def __init__(self,
                  input_size, output_size,
                  is_at_least_1=False,
-                 is_mlp=False,
+                 Generator=nn.Linear,
                  initial_gates=0.,
+                 is_gate_old=False,  # DEV MODE
                  rounding_kwargs={},
                  **kwargs):
         super().__init__()
@@ -588,41 +604,45 @@ class L0Gates(Module):
         self.input_size = input_size
         self.output_size = output_size
         self.is_at_least_1 = is_at_least_1
-        self.is_mlp = is_mlp
-        if self.is_mlp:
-            self.gate_generator = MLP(self.input_size, self.output_size, self.output_size,
-                                      **kwargs)
-        else:
-            self.gate_generator = nn.Linear(self.input_size, self.output_size,
-                                            **kwargs)
+        self.is_gate_old = is_gate_old
+        self.gate_generator = Generator(self.input_size, self.output_size,
+                                        **kwargs)
 
         if not isinstance(initial_gates, list):
             initial_gates = [initial_gates / output_size] * output_size
         self.initial_gates = torch.tensor(initial_gates, dtype=torch.float, device=device)
         self.rounder = ConcreteRounder(**rounding_kwargs)
 
+        if self.is_gate_old:
+            self.old_gater = get_gate("gated_res", input_size, self.output_size,
+                                      save_name="l0_old_gate")
+
         self.reset_parameters()
 
     def reset_parameters(self):
+        if self.is_gate_old:
+            self.gates0 = Parameter(self.initial_gates)
         super().reset_parameters()
-        if not self.is_mlp:
-            linear_init(self.gate_generator, "sigmoid")
 
     def extra_repr(self):
         return get_extra_repr(self,
                               always_shows=["input_size", "output_size"],
-                              conditional_shows=["is_mlp", "is_at_least_1"])
+                              conditional_shows=["is_at_least_1", "is_gate_old"])
 
-    def forward(self, x, loss_weights=None):
+    def forward(self, x, loss_weights=None, is_reset=True):
         gates = self.gate_generator(x)
         gates = gates + self.initial_gates
         gates = torch.sigmoid(gates)
         gates = self.rounder(gates)
 
-        if loss_weights is None:
-            loss = batch_reduction_f(gates, torch.mean)
-        else:
-            loss = batch_reduction_f(gates * loss_weights, torch.mean)
+        if self.is_gate_old:
+            gates_old = (self.gates0.expand_as(gates)
+                         if is_reset else self.storer["gates_old"])
+            gates = self.old_gater(gates, gates_old, x)
+            self.storer["gates_old"] = gates
+
+        to_reg = gates if loss_weights is None else gates * loss_weights
+        loss = batch_reduction_f(to_reg, torch.mean)
 
         if self.is_at_least_1:
             # correct only if no loss weight
@@ -661,9 +681,9 @@ class Highway(Module):
                  initial_gate=0.5,
                  is_single_gate=False,
                  is_additive_highway=False,
-                 generator=nn.Linear,
+                 Generator=nn.Linear,
                  save_name=None,
-                 is_round=True,  # DEV MODE
+                 is_round=False,
                  **kwargs):
         super().__init__()
 
@@ -671,13 +691,13 @@ class Highway(Module):
         self.initial_gate = initial_gate
         self.is_single_gate = is_single_gate
         self.is_additive_highway = is_additive_highway
-        self.generator = generator
         self.save_name = save_name
 
         self.n_gates = 1 if self.is_single_gate else n_gates
-        self.gate_generator = generator(self.controller_size, self.n_gates)
+        self.gate_generator = Generator(self.controller_size, self.n_gates)
 
-        self.gate_to_prob = ProbabilityConverter(initial_probability=self.initial_gate)
+        self.gate_to_prob = ProbabilityConverter(initial_probability=self.initial_gate,
+                                                 **kwargs)
 
         self.is_round = is_round
         if self.is_round:
@@ -710,7 +730,9 @@ class Highway(Module):
             self.add_to_visualize(gates.mean(-1).mean(-1), self.save_name)
 
         if self.is_round:
-            gates = self.rounder(gates)
+            # round if outside of [0.1, 0.9]
+            gates = self.rounder(gates,
+                                 idcs_to_round=torch.abs(gates - 0.5) > 0.4)
 
         if self.is_additive_highway:
             x_new = x_new + (1 - gates) * x_old
@@ -744,8 +766,10 @@ def get_gate(gating, *args, **kwargs):
         return res_gate
     elif gating == "highway":
         return Highway(*args, is_additive_highway=False, is_round=True, **kwargs)
-    elif gating == "custom":
+    elif gating == "gated_res":
         return Highway(*args, is_additive_highway=True, is_round=False, **kwargs)
+    elif gating == "custom":
+        return Highway(*args, is_additive_highway=True, is_round=True, **kwargs)
     else:
         ValueError("Unkown `gating={}`".format(gating))
 

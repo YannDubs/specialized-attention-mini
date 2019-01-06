@@ -104,6 +104,9 @@ class LocationAttender(Module):
             mechanism for generated values. `None` no gating. `"residual"` adds
             the new value to the previous. `"highway"` gating using convex
             combination. `"custom"` gates the previous value and add the new one.
+        is_sample_attn (bool, optional): whether to sample from the attention the
+            word to attend to. This will force sigma to be smaller, and might give
+            better estimates of position confidence.
         sigma_kwargs (dictionary, optional): additional arguments to the
             `SigmaGenerator`.
         mu_kwargs (dictionary, optional): additional arguments to the
@@ -116,7 +119,8 @@ class LocationAttender(Module):
                  pdf="gaussian",
                  Generator=nn.Linear,
                  hidden_size=64,
-                 gating="custom",
+                 gating="gated_res",
+                 is_sample_attn=False,  # DEV MODE
                  sigma_kwargs={},
                  mu_kwargs={}):
         super().__init__()
@@ -151,6 +155,9 @@ class LocationAttender(Module):
                                               **sigma_kwargs)
 
         self.pdf = get_loc_pdf(pdf)
+
+        if self.is_sample_attn:
+            self.temperature = 0.999
 
         self.reset_parameters()
 
@@ -199,6 +206,12 @@ class LocationAttender(Module):
         sigma = renormalize_input_length(sigma, source_lengths_tensor, 1)
 
         loc_attn = self._compute_attn(mu, sigma, source_lengths)
+
+        if self.training and self.is_sample_attn and self.n_training_calls > self.n_steps_prepare_pos * 2:
+            self.temperature = max(0.5, self.temperature**1.005)
+            soft_onehot = torch.distributions.RelaxedOneHotCategorical(self.temperature,
+                                                                       probs=loc_attn)
+            loc_attn = soft_onehot.rsample()
 
         return loc_attn, confidence
 
@@ -301,7 +314,7 @@ class SigmaGenerator(Module):
                  hidden_size,
                  n_steps_const_sigma=100,
                  Generator=nn.Linear,
-                 gating="custom",
+                 gating="gated_res",
                  min_sigma=0.41,
                  initial_sigma=5.0):
 
@@ -357,8 +370,7 @@ class SigmaGenerator(Module):
             sigma_old = (self.sigma0.expand_as(mu) if step == 0
                          else self.storer["sigma_old"])
             unclamped_sigma = self.gate(self.sigma_generator(weighter_out),
-                                        sigma_old,
-                                        weighter_out)
+                                        sigma_old, weighter_out)
             sigma = clamp(unclamped_sigma,
                           minimum=self.min_sigma,
                           is_leaky=True,
@@ -416,7 +428,7 @@ class MuGenerator(Module):
     def __init__(self, hidden_size,
                  max_len=50,
                  Generator=nn.Linear,
-                 gating="custom",
+                 gating="gated_res",
                  n_steps_prepare_pos=100,
                  is_l0_bb_weights=True,
                  is_reg_clamp_mu=True,
@@ -469,10 +481,11 @@ class MuGenerator(Module):
             self.loss_weights[self.bb_labels.index("bias")] = 2.
 
             rounding_kwargs = dict(n_steps_interpolate=self.n_steps_prepare_pos)
-            self.linear_l0_weights = L0Gates(hidden_size, self. n_building_blocks,
+            self.linear_l0_weights = L0Gates(hidden_size, self.n_building_blocks,
                                              is_at_least_1=True,
                                              initial_gates=1.,
-                                             rounding_kwargs=rounding_kwargs)
+                                             rounding_kwargs=rounding_kwargs,
+                                             is_gate_old=True)  # DEV MODE
 
         self.rounder_mu = get_rounder(**rounder_mu_kwargs)
 
@@ -623,7 +636,9 @@ class MuGenerator(Module):
             remove[:, :, :-3] = 0.
             mu_weights = mu_weights * remove + 1 - remove
 
-            gates, loss = self.linear_l0_weights(weighter_out, self.loss_weights)
+            gates, loss = self.linear_l0_weights(weighter_out,
+                                                 is_reset=step == 0,
+                                                 loss_weights=self.loss_weights)
             if self.is_regularize:
                 self.add_regularization_loss("pos_l0_weights", loss)
 

@@ -98,8 +98,9 @@ def get_seq2seq_model(src,
                       attender="attender",
                       is_l0_bb_weights=True,  # DEV MODE
                       is_reg_clamp_mu=True,  # DEV MODE
-                      gating="custom",  # DEV MODE
-                      rounder_weights=None  # DEV MODE
+                      gating="gated_res",  # DEV MODE
+                      rounder_weights=None,  # DEV MODE
+                      is_sample_attn=False  # DEV MODE
                       ):
     """Return a initialized extrapolator model.
 
@@ -224,12 +225,11 @@ def get_seq2seq_model(src,
     Generator = MLP if is_mlps else nn.Linear
 
     # Encoder
-    min_hidden = 16
     highway_kwargs = dict(initial_gate=initial_gate,
                           is_single_gate=is_single_gate,
                           is_additive_highway=is_additive_highway,
-                          is_mlps=is_mlps,
-                          min_hidden=min_hidden)
+                          Generator=Generator,
+                          is_round=gating == "custom")
 
     value_kwargs = dict(output_size=value_size,
                         is_highway=is_highway,
@@ -263,7 +263,8 @@ def get_seq2seq_model(src,
                            pdf=positioning_method,
                            Generator=Generator,
                            mu_kwargs=mu_kwargs,
-                           gating=gating)
+                           gating=gating,
+                           is_sample_attn=is_sample_attn)
 
     content_kwargs = dict(scorer=content_method)
 
