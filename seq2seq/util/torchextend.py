@@ -133,7 +133,7 @@ class ProbabilityConverter(Module):
                  temperature_transformer=Clamper(minimum=0.1, maximum=10., is_leaky=True,
                                                  hard_min=0.01),
                  fix_point=None,
-                 plateau_eps=5e-3  # DEV MODE # to DOC
+                 plateau_eps=1e-2  # DEV MODE # to DOC
                  ):
 
         super(ProbabilityConverter, self).__init__()
@@ -570,8 +570,7 @@ class L0Gates(Module):
 
     Notes:
         Main idea taken from `Learning Sparse Neural Networks through L_0
-        Regularization`, but modified using straight through Gumbel
-        softmax estimator.
+        Regularization`, but modified using plateau activation.
 
     Args:
         input_size (int): size of the input to the gate generator.
@@ -597,7 +596,6 @@ class L0Gates(Module):
                  Generator=nn.Linear,
                  initial_gates=0.,
                  is_gate_old=False,  # DEV MODE
-                 rounding_kwargs={},
                  **kwargs):
         super().__init__()
 
@@ -611,7 +609,8 @@ class L0Gates(Module):
         if not isinstance(initial_gates, list):
             initial_gates = [initial_gates / output_size] * output_size
         self.initial_gates = torch.tensor(initial_gates, dtype=torch.float, device=device)
-        self.rounder = ConcreteRounder(**rounding_kwargs)
+
+        self.gate_to_prob = ProbabilityConverter()
 
         if self.is_gate_old:
             self.old_gater = get_gate("gated_res", input_size, self.output_size,
@@ -632,11 +631,10 @@ class L0Gates(Module):
     def forward(self, x, loss_weights=None, is_reset=True):
         gates = self.gate_generator(x)
         gates = gates + self.initial_gates
-        gates = torch.sigmoid(gates)
-        gates = self.rounder(gates)
+        gates = self.gate_to_prob(gates)
 
         if self.is_gate_old:
-            gates_old = (self.gates0.expand_as(gates)
+            gates_old = (self.gate_to_prob(self.gates0.expand_as(gates))
                          if is_reset else self.storer["gates_old"])
             gates = self.old_gater(gates, gates_old, x)
             self.storer["gates_old"] = gates
@@ -771,7 +769,7 @@ def get_gate(gating, *args, **kwargs):
     elif gating == "custom":
         return Highway(*args, is_additive_highway=True, is_round=True, **kwargs)
     else:
-        ValueError("Unkown `gating={}`".format(gating))
+        raise ValueError("Unkown `gating={}`".format(gating))
 
 
 class PlateauAct(Module):

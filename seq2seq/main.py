@@ -91,7 +91,7 @@ def get_seq2seq_model(src,
                       rounder_mu="concrete",
                       mode_attn_mix="loc_conf",  # TO DO - medium: chose best and remove parameter
                       rate_attmix_wait=0,
-                      default_pos_perc=0.5,  # TO DO - medium: chose best and remove parameter
+                      dflt_perc_loc=0.5,  # TO DO - medium: chose best and remove parameter
                       rounder_perc="concrete",  # TO DO - medium: chose best and remove parameter
                       is_dev_mode=False,
                       is_viz_train=False,
@@ -100,7 +100,6 @@ def get_seq2seq_model(src,
                       is_reg_clamp_mu=True,  # DEV MODE
                       gating="gated_res",  # DEV MODE
                       rounder_weights=None,  # DEV MODE
-                      is_sample_attn=False  # DEV MODE
                       ):
     """Return a initialized extrapolator model.
 
@@ -198,8 +197,8 @@ def get_seq2seq_model(src,
             because it's more extrapolable.
         rate_attnmix_wait (float, optional): percentage of training steps to wait
             for before starting to generate the positional percentage. Until then
-            will use `default_pos_perc`.
-        default_pos_perc (float, optional): constant positional percentage to
+            will use `dflt_perc_loc`.
+        dflt_perc_loc (float, optional): constant positional percentage to
             use while `rate_attnmix_wait`.
         rounder_perc ({“concrete”, “stochastic”, None}, optional): the method
             for approximative differential rounding to use for rounding mu to the
@@ -263,8 +262,7 @@ def get_seq2seq_model(src,
                            pdf=positioning_method,
                            Generator=Generator,
                            mu_kwargs=mu_kwargs,
-                           gating=gating,
-                           is_sample_attn=is_sample_attn)
+                           gating=gating)
 
     content_kwargs = dict(scorer=content_method)
 
@@ -272,11 +270,11 @@ def get_seq2seq_model(src,
     rounder_perc_kwargs.update(rounders_kwars[rounder_perc])
 
     n_steps_wait = rate2steps(rate_attmix_wait)
-    mixer_kwargs = dict(is_mlps=is_mlps,
+    mixer_kwargs = dict(Generator=Generator,
                         mode=mode_attn_mix,
                         n_steps_wait=n_steps_wait,
                         rounder_perc_kwargs=rounder_perc_kwargs,
-                        default_pos_perc=default_pos_perc)
+                        dflt_perc_loc=dflt_perc_loc)
 
     attender_kwargs = dict(content_kwargs=content_kwargs,
                            location_kwargs=location_kwargs,

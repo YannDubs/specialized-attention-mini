@@ -110,6 +110,8 @@ def get_scorer(scorer, kq_size):
         scorer = MetricScorer(metric="l2")
     elif scorer == "manhattan":
         scorer = MetricScorer(metric="l1")
+    elif scorer == "kq":
+        scorer = KQScorer(kq_size)
     else:
         raise ValueError("Unknown attention method {}".format(scorer))
 
@@ -145,6 +147,37 @@ class MultiplicativeScorer(Module):
         pass
 
 
+class KQScorer(Module):
+    """
+    Key Query scorer.
+
+    Shape:
+        keys: `(batch_size, n_keys, kq_size)`
+        queries: `(batch_size, n_queries, kq_size)`
+        logits: `(batch_size, n_queries, n_keys)`
+    """
+
+    def __init__(self, dim, kq_size=32):
+        super().__init__()
+        self.key_mlp = MLP(dim, kq_size, hidden_size=kq_size)
+        self.query_mlp = MLP(dim, kq_size, hidden_size=kq_size)
+        self.dot = DotScorer(is_scale=False)
+
+        self.reset_parameters()
+
+    def forward(self, keys, queries):
+        batch_size, n_queries, kq_size = queries.size()
+
+        keys = self.key_mlp(keys)
+        queries = self.query_mlp(queries)
+
+        logits = self.dot(keys, queries)
+        return logits
+
+    def extra_repr(self):
+        pass
+
+
 class AdditiveScorer(Module):
     """
     Additive scorer for the original attention [Bahdanau et al., 2015].
@@ -168,11 +201,8 @@ class AdditiveScorer(Module):
         batch_size, n_queries, kq_size = queries.size()
         n_keys = keys.size(1)
 
-        #keys = keys.unsqueeze(1).expand(batch_size, n_queries, n_keys, kq_size)
-        #queries = queries.unsqueeze(2).expand(batch_size, n_queries, n_keys, kq_size)
-
-        keys = keys.expand(batch_size, n_queries, n_keys, kq_size)
-        queries = queries.expand(batch_size, n_queries, n_keys, kq_size)
+        keys = keys.unsqueeze(1).expand(batch_size, n_queries, n_keys, kq_size)
+        queries = queries.unsqueeze(1).expand(batch_size, n_queries, n_keys, kq_size)
 
         logits = self.mlp(torch.cat((keys, queries), dim=-1)).squeeze(-1)
         return logits

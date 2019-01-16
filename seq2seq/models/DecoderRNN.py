@@ -74,10 +74,6 @@ class DecoderRNN(BaseRNN):
 
         input_rnn_size = self.embedding_size + self.value_size
 
-        self.rel_counter = torch.arange(0, self.max_len,
-                                        dtype=torch.float,
-                                        device=device).unsqueeze(1) / (self.max_len - 1)
-
         self.dec_counter = torch.arange(1, self.max_len + 1,
                                         dtype=torch.float,
                                         device=device)
@@ -328,26 +324,13 @@ class DecoderRNN(BaseRNN):
 
     def _compute_context(self, controller_output, keys, values, source_lengths,
                          step):
-        source_lengths_list, source_lengths_tensor = format_source_lengths(source_lengths)
-
-        batch_size = values.size(0)
-
-        unormalized_counter = self.rel_counter.expand(batch_size, -1, 1)
-        rel_counter_encoder = renormalize_input_length(unormalized_counter,
-                                                       source_lengths_tensor - 1,
-                                                       self.max_len - 1)
 
         attn = self.attender(keys, controller_output, source_lengths, step,
                              controller=controller_output)
 
-        mean_attn = torch.bmm(attn,
-                              rel_counter_encoder[:, :attn.size(2), :]
-                              ).squeeze(2)
-
         context = torch.bmm(attn, values)
 
-        self.add_to_visualize([mean_attn, step],
-                              ["mean_attn", "step"])
+        self.add_to_visualize([step], ["step"])
 
         return context, attn
 

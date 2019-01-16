@@ -104,9 +104,6 @@ class LocationAttender(Module):
             mechanism for generated values. `None` no gating. `"residual"` adds
             the new value to the previous. `"highway"` gating using convex
             combination. `"custom"` gates the previous value and add the new one.
-        is_sample_attn (bool, optional): whether to sample from the attention the
-            word to attend to. This will force sigma to be smaller, and might give
-            better estimates of position confidence.
         sigma_kwargs (dictionary, optional): additional arguments to the
             `SigmaGenerator`.
         mu_kwargs (dictionary, optional): additional arguments to the
@@ -120,7 +117,6 @@ class LocationAttender(Module):
                  Generator=nn.Linear,
                  hidden_size=64,
                  gating="gated_res",
-                 is_sample_attn=False,  # DEV MODE
                  sigma_kwargs={},
                  mu_kwargs={}):
         super().__init__()
@@ -155,9 +151,6 @@ class LocationAttender(Module):
                                               **sigma_kwargs)
 
         self.pdf = get_loc_pdf(pdf)
-
-        if self.is_sample_attn:
-            self.temperature = 0.999
 
         self.reset_parameters()
 
@@ -194,7 +187,8 @@ class LocationAttender(Module):
 
         source_lengths_list, source_lengths_tensor = format_source_lengths(source_lengths)
 
-        mu, sigma = self._compute_parameters(query, step, source_lengths_tensor)
+        mu, sigma = self._compute_parameters(query, step, source_lengths_tensor,
+                                             content_attn, attn_old)
 
         confidence = self._sigma_to_conf(sigma)
 
@@ -207,15 +201,10 @@ class LocationAttender(Module):
 
         loc_attn = self._compute_attn(mu, sigma, source_lengths)
 
-        if self.training and self.is_sample_attn and self.n_training_calls > self.n_steps_prepare_pos * 2:
-            self.temperature = max(0.5, self.temperature**1.005)
-            soft_onehot = torch.distributions.RelaxedOneHotCategorical(self.temperature,
-                                                                       probs=loc_attn)
-            loc_attn = soft_onehot.rsample()
-
         return loc_attn, confidence
 
-    def _compute_parameters(self, weighter_inputs, step, source_lengths_tensor):
+    def _compute_parameters(self, weighter_inputs, step, source_lengths_tensor,
+                            content_attn, attn_old):
         """Compute the parameters of the positioning function.
 
         Return:
@@ -232,7 +221,8 @@ class LocationAttender(Module):
          self.storer["weighter_hidden"]) = self.weighter(weighter_inputs,
                                                          self.storer["weighter_hidden"])
 
-        mu = self.mu_generator(weighter_out, step, source_lengths_tensor)
+        mu = self.mu_generator(weighter_out, step, source_lengths_tensor,
+                               content_attn=content_attn, attn_old=attn_old)
 
         sigma = self.sigma_generator(weighter_out, mu, step)
 
@@ -706,13 +696,13 @@ class MuGenerator(Module):
         mean_attn_old = None
         mean_content_attn = None
         if step == 0:
-            mu_old = self.mu0.expand(batch_size, n_queries, 1)
+            mu_old = torch.sigmoid(self.mu0.expand(batch_size, n_queries, 1))
             if self.is_add_old_attn:
-                mean_attn_old = self.mean_attn_old0.expand(batch_size,
-                                                           n_queries, 1)
+                mean_attn_old = torch.sigmoid(self.mean_attn_old0.expand(batch_size,
+                                                                         n_queries, 1))
             if self.is_add_content:
-                mean_content_attn = self.mean_content_attn0.expand(batch_size,
-                                                                   n_queries, 1)
+                mean_content_attn = torch.sigmoid(self.mean_content_attn0.expand(batch_size,
+                                                                                 n_queries, 1))
         else:
             mu_old = self.storer["mu_old"]
             if self.is_add_old_attn:
@@ -751,6 +741,8 @@ class MuGenerator(Module):
         building_blocks = torch.cat(ordered_blocks, dim=2)
 
         self.add_to_visualize(building_blocks.squeeze(1), "building_blocks")
+        if self.is_add_old_attn:
+            self.add_to_visualize(mean_attn_old, "mean_attn")
         self.add_to_test(building_blocks.squeeze(1), "building_blocks")
 
         return building_blocks

@@ -24,7 +24,7 @@ class LocationOnlyAttender(Module):
     """Location Attender.
 
     Args:
-        query_size (int): size of the query.
+        controller_size (int): size of the controler.
         max_len (int): a maximum allowed length for the sequence to be processed
         n_steps_prepare_pos (int): number of steps during which to consider
             the positioning as in a preparation mode. During preparation mode,
@@ -44,38 +44,33 @@ class LocationOnlyAttender(Module):
             mechanism for generated values. `None` no gating. `"residual"` adds
             the new value to the previous. `"highway"` gating using convex
             combination. `"custom"` gates the previous value and add the new one.
-        is_sample_attn (bool, optional): whether to sample from the attention the
-            word to attend to. This will force sigma to be smaller, and might give
-            better estimates of position confidence.
         sigma_kwargs (dictionary, optional): additional arguments to the
             `SigmaGenerator`.
         mu_kwargs (dictionary, optional): additional arguments to the
             `MuGenerator`.
     """
 
-    def __init__(self, query_size, max_len,
+    def __init__(self, controller_size, max_len,
                  n_steps_prepare_pos=100,
                  pdf="gaussian",
                  Generator=nn.Linear,
                  hidden_size=64,
                  gating="gated_res",
-                 is_sample_attn=False,  # DEV MODE
                  sigma_kwargs={},
                  mu_kwargs={}):
         super().__init__()
 
-        self.query_size = query_size
+        self.controller_size = controller_size
         self.max_len = max_len
         self.n_steps_prepare_pos = n_steps_prepare_pos
         self.pdf = pdf
         self.gating = gating
-        self.is_sample_attn = is_sample_attn
 
         self.rel_counter = torch.arange(0, self.max_len,
                                         dtype=torch.float,
                                         device=device).unsqueeze(1) / (self.max_len - 1)
 
-        self.resizer = nn.Linear(self.query_size, hidden_size)
+        self.resizer = nn.Linear(self.controller_size, hidden_size)
 
         self.weighter, self.hidden0 = get_rnn("gru", hidden_size, hidden_size,
                                               batch_first=True,
@@ -97,9 +92,6 @@ class LocationOnlyAttender(Module):
                                               **sigma_kwargs)
 
         self.pdf = get_loc_pdf(pdf)
-
-        if self.is_sample_attn:
-            self.temperature = 0.999
 
         self.reset_parameters()
 
@@ -144,12 +136,6 @@ class LocationOnlyAttender(Module):
         loc_attn = self._compute_attn(mu, sigma, source_lengths)
 
         self.add_to_test([loc_attn], ["loc_attention"])
-
-        if self.training and self.is_sample_attn and self.n_training_calls > self.n_steps_prepare_pos * 2:
-            self.temperature = max(0.5, self.temperature**1.005)
-            soft_onehot = torch.distributions.RelaxedOneHotCategorical(self.temperature,
-                                                                       probs=loc_attn)
-            loc_attn = soft_onehot.rsample()
 
         return loc_attn
 
@@ -208,7 +194,7 @@ class ContentOnlyAttender(Module):
     """Content Attender.
 
     Args:
-        kq_size (int): key and query size.
+        controller_size (int): size of the controler.
         scorer({'multiplicative', "additive", "euclidean", "scaledot", "cosine"}, optional):
             The method to compute the alignment. `"scaledot" [Vaswani et al., 2017]
             mitigates the high dimensional issue by rescaling the dot product.
@@ -218,17 +204,18 @@ class ContentOnlyAttender(Module):
             distance. `"euclidean"` Euclidean distance.
     """
 
-    def __init__(self, kq_size, max_len=None, scorer="multiplicative"):
+    def __init__(self, controller_size, max_len=None, scorer="multiplicative"):
         super().__init__()
 
-        self.scorer = get_scorer(scorer, kq_size)
+        self.scorer = get_scorer(scorer, controller_size)
 
         self.reset_parameters()
 
     def extra_repr(self):
         pass
 
-    def forward(self, keys, queries, source_lengths=None, step=None, controller=None):
+    def forward(self, keys, queries, source_lengths=None, step=None,
+                controller=None):
         """Compute the content attention.
 
         Args:
