@@ -14,7 +14,7 @@ from torch.nn.parameter import Parameter
 from seq2seq.util.helpers import (renormalize_input_length, batch_reduction_f,
                                   get_extra_repr, format_source_lengths)
 from seq2seq.util.torchextend import (MLP, ConcreteRounder, get_rounder,
-                                      StochasticRounder, get_gate)
+                                      StochasticRounder, get_gate, PlateauAct)
 from seq2seq.util.initialization import weights_init
 from seq2seq.util.base import Module
 from seq2seq.attention.content import ContentAttender
@@ -29,12 +29,16 @@ class Attender(Module):
 
     Args:
         controller_size (int): size of the controller tensor.
+        max_len (int, optional): a maximum allowed length for the sequence to be
+            processed.
+        loc_query_size (int, optional) dimension to use for the location query size.
         content_kwargs (dict, optional): additional arguments to `ContentAttender`.
         location_kwargs (dict, optional): additional arguments to `LocationAttender`.
         mixer_kwargs (dict, optional): additional arguments to `AttentionMixer`.
     """
 
-    def __init__(self, controller_size, max_len,
+    def __init__(self, controller_size,
+                 max_len=50,
                  loc_query_size=64,
                  content_kwargs={},
                  location_kwargs={},
@@ -77,7 +81,7 @@ class Attender(Module):
 
         old_attn = self.storer["old_attn"] if step != 0 else None
         loc_attn, conf_loc = self.location_attender(query, source_lengths, step,
-                                                    content_attn, old_attn)
+                                                    old_attn)
 
         self.add_to_visualize([conf_content, conf_loc], ["content_confidence", "loc_confidence"])
         self.add_to_test([content_attn, loc_attn], ["content_attention", "loc_attention"])
@@ -89,6 +93,17 @@ class Attender(Module):
         self.storer["old_attn"] = attn
 
         return attn
+
+    def load_locator(self, file):
+        """
+        Loads a pretrained locator (output from self.save_locator) for transfer
+        learning.
+        """
+        self.location_attender.load_locator(file)
+
+    def save_locator(self, file):
+        """Save the pretrained locator to a file."""
+        self.location_attender.save_locator(file)
 
 
 class AttentionMixer(Module):
@@ -115,10 +130,10 @@ class AttentionMixer(Module):
             will use `dflt_perc_loc`.
         default_perc_loc (float, optional): constant positional percentage to
             use while `n_steps_wait`.
-        gating ({None, "residual", "highway", "custom"}, optional): Gating
+        gating ({None, "residual", "highway", "gates_res"}, optional): Gating
             mechanism for generated values. `None` no gating. `"residual"` adds
             the new value to the previous. `"highway"` gating using convex
-            combination. `"custom"` gates the previous value and add the new one.
+            combination. `"gates_res"` gates the previous value and add the new one.
         rounder_perc_kwargs (dictionary, optional): Additional arguments to
             the percentage rounder.
     """
@@ -139,7 +154,11 @@ class AttentionMixer(Module):
                                           dtype=torch.float,
                                           device=device)
         self.gate = get_gate(gating, controller_size, 1, is_single_gate=True)
-        self.rounder_perc = get_rounder(**rounder_perc_kwargs)
+
+        self.rounder_perc = get_rounder(**rounder_perc_kwargs)  # DEV MODE
+
+        if self.rounder_perc is None:
+            self.acti_plat = PlateauAct(plateaus=[-1, 1], len_plateaus=5e-1)
 
         if self.mode == "generate":
             self.generator = Generator(controller_size, 1)
@@ -171,9 +190,9 @@ class AttentionMixer(Module):
         """
         if not self.training or self.n_training_calls >= self.n_steps_wait:
             if self.mode == "loc_conf":
-                perc_loc = conf_loc
+                perc_loc = conf_loc.unsqueeze(-1)
             elif self.mode == "confidence":
-                perc_loc = conf_loc / (conf_loc + conf_content)
+                perc_loc = (conf_loc / (conf_loc + conf_content)).unsqueeze(-1)
             elif self.mode == "generate":
                 perc_loc = self.generator(controller)
             else:
@@ -184,6 +203,8 @@ class AttentionMixer(Module):
 
         if self.rounder_perc is not None:
             perc_loc = self.rounder_perc(perc_loc)
+        else:
+            perc_loc = self.acti_plat(perc_loc)
 
         # Convex combination
         attn = (loc_attn * perc_loc) + ((1 - perc_loc) * content_attn)

@@ -3,14 +3,7 @@ Decoder class for a seq2seq.
 
 TO DO:
     - Lot of refactoring here. I build step by step on the machine library, so
-    a lot of the work feels (and is) donc in an ad-hoc way. everything should
-    be made with the idea of having Key Value Query Position by default (although
-    we should still keep the possibility to remove those in order to compare results
-    although the vanilla one doesn't need to be otpimized: i.e we can use tricks
-    to make it work in postioning framework.)
-    - The attention classes should be initialized in the decoder but rather given
-    the constructor of the decoder. Indeed we want the decoder to be general and not
-    specific to our type of attention.
+    a lot of the work feels (and is) done in an ad-hoc way.
 
 Contact : Yann Dubois
 """
@@ -69,7 +62,6 @@ class DecoderRNN(BaseRNN):
         self.output_size = vocab_size
         self.eos_id = eos_id
         self.sos_id = sos_id
-
         self.value_size = value_size
 
         input_rnn_size = self.embedding_size + self.value_size

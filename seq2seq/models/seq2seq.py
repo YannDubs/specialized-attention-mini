@@ -3,7 +3,7 @@ Seq2seq class.
 
 NOTA BENE:
     - I changed only a few things here.
-    - input_lengths should not be this tuple trick
+    - input_lengths should not use this tuple trick
 """
 import torch
 

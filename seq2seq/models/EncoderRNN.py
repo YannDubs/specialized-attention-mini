@@ -2,10 +2,13 @@
 Encoder class for a seq2seq.
 
 NOTA BENE:
-     - Modified substantially from `Machine`.
+     - Major difference is the value generator
 
 Contact: Yann Dubois
 """
+import math
+import warnings
+
 import torch
 import torch.nn as nn
 from torch.nn.parameter import Parameter
@@ -14,11 +17,22 @@ from torch.nn.utils.rnn import pad_sequence
 from .baseRNN import BaseRNN
 
 from seq2seq.util.initialization import replicate_hidden0, init_param, weights_init
-from seq2seq.util.helpers import get_rnn, get_extra_repr, format_source_lengths
-from seq2seq.util.torchextend import ProbabilityConverter
-from seq2seq.attention.KVQ import ValueGenerator
+from seq2seq.util.helpers import (get_rnn, get_extra_repr, format_source_lengths)
+from seq2seq.util.base import Module
+from seq2seq.util.torchextend import ProbabilityConverter, Highway
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def _compute_size(size, hidden_size, name=None):
+    if size == -1:
+        return hidden_size
+    elif 0 < size < 1:
+        return math.ceil(size * hidden_size)
+    elif 0 < size <= hidden_size:
+        return size
+    else:
+        raise ValueError("Invalid size for {} : {}".format(name, size))
 
 
 class EncoderRNN(BaseRNN):
@@ -32,7 +46,7 @@ class EncoderRNN(BaseRNN):
         embedding_size (int): the size of the embedding of input variables
         value_kwargs (dict, optional): additional arguments to the value generator.
         kwargs:
-            Additional arguments to `get_rnn` and `BaseRNN`
+            Additional arguments to `BaseRNN`
     """
 
     def __init__(self, vocab_size, max_len, hidden_size, embedding_size,
@@ -96,3 +110,71 @@ class EncoderRNN(BaseRNN):
         last_control_out = output[:, -1:, :]
 
         return keys, values, hidden, last_control_out
+
+
+class ValueGenerator(Module):
+    """Value generator class.
+
+    Args:
+        input_size (int): size of the hidden activations of the controller,
+            which will be given as input to the generator.
+        embedding_size (int): size of the embeddings.
+        output_size (int, optional): output size of the generator.
+        is_highway (bool, optional): whether to use a highway between the
+            embedding an the output.
+        highway_kwargs (dictionary, optional): additional arguments to highway.
+        Generator (Module, optional): module to generate various values. It
+            should be callable using `Generator(input_size, output_size)(x)`.
+            By default `nn.Linear`.
+        kwargs:
+            Additional arguments for the `BaseKeyValueQuery` parent class.
+    """
+
+    def __init__(self, input_size, embedding_size,
+                 output_size=-1,
+                 is_highway=False,
+                 highway_kwargs={},
+                 Generator=nn.Linear,
+                 **kwargs):
+
+        super(ValueGenerator, self).__init__()
+
+        self.input_size = input_size
+        self.output_size = _compute_size(output_size, self.input_size,
+                                         name="output_size - {}".format(type(self).__name__))
+
+        if is_highway and embedding_size != self.output_size:
+            warnings.warn("Using value_size == {} instead of {} because highway.".format(embedding_size, self.output_size))
+            self.output_size = embedding_size
+
+        self.is_highway = is_highway
+
+        self.generator = Generator(self.input_size, self.output_size)
+
+        if self.is_highway:
+            self.highway = Highway(self.input_size, self.output_size,
+                                   save_name="value_gates", **highway_kwargs)
+
+        self.reset_parameters()
+
+    def extra_repr(self):
+        return get_extra_repr(self,
+                              always_shows=["input_size", "output_size"],
+                              conditional_shows=["is_highway"])
+
+    def forward(self, input_generator, embedded):
+        """Generate the value.
+
+        Args:
+            input_generator (torch.tensor): tensor of size (batch_size, input_length,
+                hidden_size) containing the hidden activations of the encoder.
+            embedded (torch.tensor): tensor of size (batch_size, input_length,
+                embedding_size) containing the input embeddings.
+        """
+
+        values = self.generator(input_generator)
+
+        if self.is_highway:
+            values = self.highway(values, embedded, input_generator)
+
+        return values

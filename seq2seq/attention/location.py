@@ -2,13 +2,7 @@
 Positioning attention.
 
 TO DO:
-- remove all the dependencies on `additional`. By removing the number of possible
-    hyperparameters it will be a lot simple to simply write down the functions
-    with specific inputs / outputs without dependencies on `additional`.
-- many parameters that I keep for dev mode / comparasion here: you definitely
-    don't have to accept all of these when refactoring. In case you are not sure
-    which ones to keep : just ask me (but the ones that I know we should remove
-    for sure are noted.
+    - most important part of `spattn`
 
 Contact: Yann Dubois
 """
@@ -85,7 +79,7 @@ class LocationAttender(Module):
 
     Args:
         query_size (int): size of the query.
-        max_len (int): a maximum allowed length for the sequence to be processed
+        max_len (int, optional): a maximum allowed length for the sequence to be processed
         n_steps_prepare_pos (int): number of steps during which to consider
             the positioning as in a preparation mode. During preparation mode,
             the model have less parameters to tweak, it will focus on what I thought
@@ -100,10 +94,10 @@ class LocationAttender(Module):
             By default `nn.Linear`.
         hidden_size (int, optional): number of neurones to use in the hidden layer
             of the weighter.
-        gating ({None, "residual", "highway", "custom"}, optional): Gating
+        gating ({None, "residual", "highway", "gates_res"}, optional): Gating
             mechanism for generated values. `None` no gating. `"residual"` adds
             the new value to the previous. `"highway"` gating using convex
-            combination. `"custom"` gates the previous value and add the new one.
+            combination. `"gates_res"` gates the previous value and add the new one.
         sigma_kwargs (dictionary, optional): additional arguments to the
             `SigmaGenerator`.
         mu_kwargs (dictionary, optional): additional arguments to the
@@ -117,6 +111,7 @@ class LocationAttender(Module):
                  Generator=nn.Linear,
                  hidden_size=64,
                  gating="gated_res",
+                 pretrained_locator=None,  # DEV MODE
                  sigma_kwargs={},
                  mu_kwargs={}):
         super().__init__()
@@ -126,6 +121,7 @@ class LocationAttender(Module):
         self.n_steps_prepare_pos = n_steps_prepare_pos
         self.pdf = pdf
         self.gating = gating
+        self.pretrained_locator = pretrained_locator
 
         self.rel_counter = torch.arange(0, self.max_len,
                                         dtype=torch.float,
@@ -140,8 +136,6 @@ class LocationAttender(Module):
                                         Generator=Generator,
                                         gating=self.gating,
                                         n_steps_prepare_pos=n_steps_prepare_pos,
-                                        is_add_content=True,
-                                        is_add_old_attn=True,
                                         **mu_kwargs)
 
         self.sigma_generator = SigmaGenerator(hidden_size,
@@ -154,12 +148,42 @@ class LocationAttender(Module):
 
         self.reset_parameters()
 
+        if self.pretrained_locator is not None:
+            self.load_locator(self.pretrained_locator)
+
+    def reset_parameters(self):
+        """Reset and initialize the module parameters."""
+        if self.pretrained_locator is None:
+            # only reset param if not pretrained
+            super().reset_parameters()
+
     def extra_repr(self):
         return get_extra_repr(self,
                               always_shows=["pdf"],
-                              conditional_shows=["gating"])
+                              conditional_shows=["gating", "pretrained_locator"])
 
-    def forward(self, query, source_lengths, step, content_attn, attn_old):
+    def load_locator(self, file):
+        """
+        Loads a pretrained locator (output from self.save_locator) for transfer
+        learning.
+        """
+        locator = torch.load(file)
+        self.weighter.load_state_dict(locator["weighter"])
+        self.mu_generator.load_state_dict(locator["mu_generator"])
+        self.sigma_generator.load_state_dict(locator["sigma_generator"])
+        self.hidden0 = locator["hidden0"]
+        self.pdf = locator["pdf"]
+
+    def save_locator(self, file):
+        """Save the pretrained locator to a file."""
+        locator = dict(weighter=self.weighter.state_dict(),
+                       hidden0=self.hidden0,
+                       mu_generator=self.mu_generator.state_dict(),
+                       sigma_generator=self.sigma_generator.state_dict(),
+                       pdf=self.pdf)
+        torch.save(locator, file)
+
+    def forward(self, query, source_lengths, step, attn_old):
         """Compute and return the location attention, confidence.
 
         Args:
@@ -169,8 +193,6 @@ class LocationAttender(Module):
                 Tensor has the same information but is preinitialized on teh
                 correct device.
             step (int): current decoding step.
-            content_attn (torch.tensor): content attention. Shape: (batch_size,
-                n_queries, n_keys).
             attn_old (torch.tensor): previous general attention. Shape: (batch_size,
                 n_queries, n_keys).
 
@@ -188,11 +210,11 @@ class LocationAttender(Module):
         source_lengths_list, source_lengths_tensor = format_source_lengths(source_lengths)
 
         mu, sigma = self._compute_parameters(query, step, source_lengths_tensor,
-                                             content_attn, attn_old)
+                                             attn_old)
 
-        confidence = self._sigma_to_conf(sigma)
+        confidence = self._sigma_to_conf(sigma).squeeze(-1)
 
-        to_store = [x.squeeze(1) for x in [mu, sigma, confidence]]
+        to_store = [x.squeeze(-1) for x in [mu, sigma]] + [confidence]
         labels_to_store = ["mu", "sigma", "loc_confidence"]
         self.add_to_visualize(to_store, labels_to_store)
         self.add_to_test(to_store[:-1], labels_to_store[:-1])
@@ -204,7 +226,7 @@ class LocationAttender(Module):
         return loc_attn, confidence
 
     def _compute_parameters(self, weighter_inputs, step, source_lengths_tensor,
-                            content_attn, attn_old):
+                            attn_old):
         """Compute the parameters of the positioning function.
 
         Return:
@@ -222,7 +244,7 @@ class LocationAttender(Module):
                                                          self.storer["weighter_hidden"])
 
         mu = self.mu_generator(weighter_out, step, source_lengths_tensor,
-                               content_attn=content_attn, attn_old=attn_old)
+                               attn_old)
 
         sigma = self.sigma_generator(weighter_out, mu, step)
 
@@ -284,10 +306,10 @@ class SigmaGenerator(Module):
     n_steps_const_sigma(int): number of steps during which to have a constant sigma.
     Generator (Module, optional): module to generate various values. It
         should be callable using `Generator(input_size, output_size)(x)`.
-    gating ({None, "residual", "highway", "custom"}, optional): Gating
+    gating ({None, "residual", "highway", "gates_res"}, optional): Gating
         mechanism for generated values. `None` no gating. `"residual"` adds
         the new value to the previous. `"highway"` gating using convex
-        combination. `"custom"` gates the previous value and add the new one.
+        combination. `"gates_res"` gates the previous value and add the new one.
     min_sigma (float, optional): minimum value of the standard deviation in
          order not to have division by 0. This is also important to let the network
          continue learning by always attending to multiple words. It should be
@@ -380,10 +402,10 @@ class MuGenerator(Module):
     Generator (Module, optional): module to generate various values. It
         should be callable using `Generator(input_size, output_size)(x)`.
         By default `nn.Linear`.
-    gating ({None, "residual", "highway", "custom"}, optional): Gating
+    gating ({None, "residual", "highway", "gates_res"}, optional): Gating
         mechanism for generated values. `None` no gating. `"residual"` adds
         the new value to the previous. `"highway"` gating using convex
-        combination. `"custom"` gates the previous value and add the new one.
+        combination. `"gates_res"` gates the previous value and add the new one.
     n_steps_prepare_pos (int): number of steps during which to consider
         the positioning as in a preparation mode. During preparation mode,
         the model have less parameters to tweak, it will focus on what I thought
@@ -391,28 +413,16 @@ class MuGenerator(Module):
         sigma and won't have many of the regularization term, this is to
         help it start at a decent place in a lower dimensional space, before
         going to the hard task of tweaking all at the same time.
-    is_l0_bb_weights (bool, optional): whether to use l0 regularisation on
-        the building block weights. This is achieved by reparametrizing the
-        l0 loss as done in “Learning Sparse Neural Network through L_0
-        Regularisation”.
     is_reg_clamp_mu (bool, optional): whether to regularise with lp norm the
         clamping of mu. I.e push the network to not overshoot and really
         generate the desired mu rather than the clamped one. This can be
         useful as if the mu completely overshoots it will be hard for it to
         come back to normal values if it needs to. It also makes sense to
         output what you want rather than relying on postpropressing.
-    is_add_content (bool, optional): whether to add the current content
-        attention in the building blocks.
-    is_add_old_attn (bool, optional): whether to add the previous attention in
-        the building blocks.
     rounder_mu_kwargs (dictionary, optional): additional arguments to the
         rounder mu. Rounding is desirable to make the position attention
         look at the correct position even for sentences longer than it have
         ever seen.
-    rounder_weights_kwargs (dictionary, optional): additional arguments to the
-        rounder weights. Rounding is desirable to make the output more
-        interpretable and extrapolable (as the building blocks were designed
-        such that integer wights could be used to solve most positonal patterns).
     """
 
     def __init__(self, hidden_size,
@@ -420,31 +430,20 @@ class MuGenerator(Module):
                  Generator=nn.Linear,
                  gating="gated_res",
                  n_steps_prepare_pos=100,
-                 is_l0_bb_weights=True,
                  is_reg_clamp_mu=True,
-                 is_add_content=True,
-                 is_add_old_attn=True,
                  rounder_mu_kwargs={},
-                 rounder_weights_kwargs={},
                  ):
 
         super().__init__()
 
         self.max_len = max_len
         self.n_steps_prepare_pos = n_steps_prepare_pos
-        self.is_l0_bb_weights = is_l0_bb_weights
         self.is_reg_clamp_mu = is_reg_clamp_mu
-        self.is_add_content = is_add_content
-        self.is_add_old_attn = is_add_old_attn
 
         # Building blocks
         self.single_step = torch.tensor(1. / (self.max_len - 1)).to(device)
         self.bias = torch.tensor(1.0).to(device)
-        self.bb_labels = ["mu_old", "diagonal", "single_step", "bias"]
-        if self.is_add_content:
-            self.bb_labels = ["mean_content_attn"] + self.bb_labels
-        if self.is_add_old_attn:
-            self.bb_labels = ["mean_attn_old"] + self.bb_labels
+        self.bb_labels = ["mean_attn_old", "diagonal", "single_step", "bias"]
         self.n_building_blocks = len(self.bb_labels)
 
         self.mu_weights_generator = Generator(hidden_size, self.n_building_blocks)
@@ -452,30 +451,20 @@ class MuGenerator(Module):
         self.gate = get_gate(gating, hidden_size, self.n_building_blocks,
                              is_single_gate=False, save_name="mu_gates")
 
-        self.rounder_weights = get_rounder(**rounder_weights_kwargs)
-
         self.acti_plat_int = PlateauAct(plateaus="int")
 
-        if self.rounder_weights is None:
-            self.acti_plat_diag = PlateauAct(plateaus=[-1, 1]
-                                             if self.is_l0_bb_weights else [-1, 0, 1],
-                                             len_plateaus=5e-1)
-            self.acti_plat_bias = PlateauAct(plateaus=[-0.5, 0.5]
-                                             if self.is_l0_bb_weights else [-0.5, 0, 0.5],
-                                             len_plateaus=3e-1)
-            self.acti_plat = PlateauAct(plateaus=[0, 1], len_plateaus=3e-1)
+        self.acti_plat_diag = PlateauAct(plateaus=[-1, 1], len_plateaus=5e-1)
+        self.acti_plat_bias = PlateauAct(plateaus=[-0.5, 0.5], len_plateaus=3e-1)
+        self.acti_plat = PlateauAct(plateaus=[0, 1], len_plateaus=3e-1)
 
-        if self.is_l0_bb_weights:
-            self.loss_weights = torch.ones(self.n_building_blocks, device=device)
-            self.loss_weights[self.bb_labels.index("single_step")] = 2.
-            self.loss_weights[self.bb_labels.index("bias")] = 2.
+        self.loss_weights = torch.ones(self.n_building_blocks, device=device)
+        self.loss_weights[self.bb_labels.index("single_step")] = 2.
+        self.loss_weights[self.bb_labels.index("bias")] = 2.
 
-            rounding_kwargs = dict(n_steps_interpolate=self.n_steps_prepare_pos)
-            self.linear_l0_weights = L0Gates(hidden_size, self.n_building_blocks,
-                                             is_at_least_1=True,
-                                             initial_gates=1.,
-                                             rounding_kwargs=rounding_kwargs,
-                                             is_gate_old=True)  # DEV MODE
+        self.linear_l0_weights = L0Gates(hidden_size, self.n_building_blocks,
+                                         is_at_least_1=True,
+                                         initial_gates=1.,
+                                         is_gate_old=True)  # DEV MODE
 
         self.rounder_mu = get_rounder(**rounder_mu_kwargs)
 
@@ -493,19 +482,12 @@ class MuGenerator(Module):
 
     def extra_repr(self):
         return get_extra_repr(self,
-                              always_shows=["is_l0_bb_weights", "is_reg_clamp_mu"],
-                              conditional_shows=["is_add_old_attn", "is_add_content"])
+                              always_shows=["is_reg_clamp_mu"])
 
     def reset_parameters(self):
         """Reset and initialize the module parameters."""
         weights = [0.25, 0.25, 0, 0.]
-        self.mu0 = Parameter(torch.tensor(0.))
-        if self.is_add_old_attn:
-            self.mean_attn_old0 = Parameter(torch.tensor(0.))
-            weights = [0.25] + weights
-        if self.is_add_content:
-            self.mean_content_attn0 = Parameter(torch.tensor(0.))
-            weights = [0.25] + weights
+        self.mean_attn_old0 = Parameter(torch.tensor(0.))
 
         self.weights = torch.tensor(weights)
         self.old_weights0 = Parameter(self.weights)
@@ -515,8 +497,7 @@ class MuGenerator(Module):
 
         super().reset_parameters()
 
-    def forward(self, weighter_out, step, source_lengths_tensor,
-                content_attn=None, attn_old=None):
+    def forward(self, weighter_out, step, source_lengths_tensor, attn_old):
         """Compute the mean of the location attention.
 
         Args:
@@ -539,7 +520,6 @@ class MuGenerator(Module):
         building_blocks = self._get_building_blocks(weighter_out,
                                                     source_lengths_tensor,
                                                     step,
-                                                    content_attn,
                                                     attn_old)
 
         mu = torch.bmm(mu_weights.view(batch_size * n_queries, 1, self.n_building_blocks),
@@ -548,7 +528,6 @@ class MuGenerator(Module):
 
         mu = self._transform_mu(mu, source_lengths_tensor, step)
 
-        self.storer["mu_old"] = mu
         self.add_to_test([mu_weights, raw_mu_weights], ['mu_weights', 'raw_mu_weights'])
         self.add_to_visualize([mu_weights], ['mu_weights'])
 
@@ -572,39 +551,17 @@ class MuGenerator(Module):
         # plateau activation or rounding
         dict_mu_weights = dict(zip(self.bb_labels, mu_weights.unbind(-1)))
 
-        if self.rounder_weights is not None:  # DEV MODE
-            assert self.is_l0_bb_weights
-            for i, l in enumerate(self.bb_labels):
-                is_update = (self.training and step == 0 and i == 0)
-                if l == "diagonal":
-                    dict_mu_weights[l] = clamp(dict_mu_weights[l], minimum=-1., maximum=1)
-                    dict_mu_weights[l] = self.rounder_weights((dict_mu_weights[l] + 1) / 2,
-                                                              is_update=is_update) * 2 - 1
-                elif l == "single_step":
-                    dict_mu_weights[l] = self.rounder_weights(dict_mu_weights[l],
-                                                              is_update=is_update)
-                elif l == "bias":
-                    dict_mu_weights[l] = clamp(dict_mu_weights[l], minimum=-.5, maximum=.5)
-                    dict_mu_weights[l] = self.rounder_weights(dict_mu_weights[l] + .5,
-                                                              is_update=is_update) - .5
-                elif l in ["mu_old", "mean_content_attn", "mean_attn_old"]:
-                    dict_mu_weights[l] = clamp(dict_mu_weights[l], minimum=0., maximum=1.)
-                    dict_mu_weights[l] = self.rounder_weights(dict_mu_weights[l],
-                                                              is_update=is_update)
-                else:
-                    raise ValueError("Unkown label={}".format(l))
-        else:
-            for l in self.bb_labels:
-                if l == "diagonal":
-                    dict_mu_weights[l] = self.acti_plat_diag(dict_mu_weights[l])
-                elif l == "single_step":
-                    dict_mu_weights[l] = self.acti_plat_int(dict_mu_weights[l])
-                elif l == "bias":
-                    dict_mu_weights[l] = self.acti_plat_bias(dict_mu_weights[l])
-                elif l in ["mu_old", "mean_content_attn", "mean_attn_old"]:
-                    dict_mu_weights[l] = self.acti_plat(dict_mu_weights[l])
-                else:
-                    raise ValueError("Unkown label={}".format(l))
+        for l in self.bb_labels:
+            if l == "diagonal":
+                dict_mu_weights[l] = self.acti_plat_diag(dict_mu_weights[l])
+            elif l == "single_step":
+                dict_mu_weights[l] = self.acti_plat_int(dict_mu_weights[l])
+            elif l == "bias":
+                dict_mu_weights[l] = self.acti_plat_bias(dict_mu_weights[l])
+            elif l == "mean_attn_old":
+                dict_mu_weights[l] = self.acti_plat(dict_mu_weights[l])
+            else:
+                raise ValueError("Unkown label={}".format(l))
 
         # regularizes single step
         if self.is_regularize:
@@ -618,24 +575,23 @@ class MuGenerator(Module):
         ordered_weights = [dict_mu_weights[l] for l in self.bb_labels]
         mu_weights = torch.stack(ordered_weights, dim=2)
 
-        # l0
-        if self.is_l0_bb_weights:
-            # when using l0 gating no need of having weight for cont / total_attn/
-            # pos because will be either 1 or 0 (gated)
-            remove = torch.ones_like(mu_weights)
-            remove[:, :, :-3] = 0.
-            mu_weights = mu_weights * remove + 1 - remove
+        # TO UPDATE
+        # when using l0 gating no need of having weight for cont / total_attn/
+        # pos because will be either 1 or 0 (gated)
+        remove = torch.ones_like(mu_weights)
+        remove[:, :, :-3] = 0.
+        mu_weights = mu_weights * remove + 1 - remove
 
-            gates, loss = self.linear_l0_weights(weighter_out,
-                                                 is_reset=step == 0,
-                                                 loss_weights=self.loss_weights)
-            if self.is_regularize:
-                self.add_regularization_loss("pos_l0_weights", loss)
+        gates, loss = self.linear_l0_weights(weighter_out,
+                                             is_reset=step == 0,
+                                             loss_weights=self.loss_weights)
+        if self.is_regularize:
+            self.add_regularization_loss("pos_l0_weights", loss)
 
-            self.add_to_visualize(gates.sum(-1).mean(), "bb_gates")
-            self.add_to_test([mu_weights, gates], ['ungated_weights', "bb_gates"])
+        self.add_to_visualize(gates.sum(-1).mean(), "bb_gates")
+        self.add_to_test([mu_weights, gates], ['ungated_weights', "bb_gates"])
 
-            mu_weights = (mu_weights * gates)
+        mu_weights = (mu_weights * gates)
 
         self.storer["mu_weights"] = mu_weights
 
@@ -678,8 +634,7 @@ class MuGenerator(Module):
 
         return mu
 
-    def _get_building_blocks(self, query, source_lengths_tensor, step,
-                             content_attn=None, attn_old=None):
+    def _get_building_blocks(self, query, source_lengths_tensor, step, attn_old):
         """Get the inputs and the buillding blocks for location generation.
 
         Return:
@@ -693,26 +648,13 @@ class MuGenerator(Module):
                                                source_lengths_tensor - 1,
                                                self.max_len - 1)
 
-        mean_attn_old = None
-        mean_content_attn = None
         if step == 0:
-            mu_old = torch.sigmoid(self.mu0.expand(batch_size, n_queries, 1))
-            if self.is_add_old_attn:
-                mean_attn_old = torch.sigmoid(self.mean_attn_old0.expand(batch_size,
-                                                                         n_queries, 1))
-            if self.is_add_content:
-                mean_content_attn = torch.sigmoid(self.mean_content_attn0.expand(batch_size,
-                                                                                 n_queries, 1))
+            mean_attn_old = torch.sigmoid(self.mean_attn_old0.expand(batch_size,
+                                                                     n_queries, 1))
         else:
-            mu_old = self.storer["mu_old"]
-            if self.is_add_old_attn:
-                mean_attn_old = torch.bmm(attn_old,
-                                          rel_counter[:, :attn_old.size(2), :]
-                                          )
-            if self.is_add_content:
-                mean_content_attn = torch.bmm(content_attn,
-                                              rel_counter[:, :content_attn.size(2), :]
-                                              )
+            mean_attn_old = torch.bmm(attn_old,
+                                      rel_counter[:, :attn_old.size(2), :]
+                                      )
 
         # t/n
         diagonal = rel_counter[:, step:step + n_queries, :]
@@ -726,23 +668,20 @@ class MuGenerator(Module):
 
         building_blocks = dict(mean_attn_old=mean_attn_old,
                                diagonal=diagonal,
-                               mean_content_attn=mean_content_attn,
                                bias=bias,
-                               mu_old=mu_old,
                                single_step=single_step)
 
         # set mu 0 to be middle
         # not mu_old as already correct
         for l in self.bb_labels:
-            if l in ["diagonal", "mean_attn_old", "mean_content_attn"]:
+            if l in ["diagonal", "mean_attn_old"]:
                 building_blocks[l] = building_blocks[l] - 0.5
 
         ordered_blocks = [building_blocks[l] for l in self.bb_labels]
         building_blocks = torch.cat(ordered_blocks, dim=2)
 
-        self.add_to_visualize(building_blocks.squeeze(1), "building_blocks")
-        if self.is_add_old_attn:
-            self.add_to_visualize(mean_attn_old, "mean_attn")
+        self.add_to_visualize([building_blocks.squeeze(1), mean_attn_old],
+                              ["building_blocks", "mean_attn"])
         self.add_to_test(building_blocks.squeeze(1), "building_blocks")
 
         return building_blocks

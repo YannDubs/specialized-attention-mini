@@ -96,10 +96,8 @@ def get_seq2seq_model(src,
                       is_dev_mode=False,
                       is_viz_train=False,
                       attender="attender",
-                      is_l0_bb_weights=True,  # DEV MODE
                       is_reg_clamp_mu=True,  # DEV MODE
-                      gating="gated_res",  # DEV MODE
-                      rounder_weights=None,  # DEV MODE
+                      pretrained_locator=None  # DEV MODE
                       ):
     """Return a initialized extrapolator model.
 
@@ -227,13 +225,12 @@ def get_seq2seq_model(src,
     highway_kwargs = dict(initial_gate=initial_gate,
                           is_single_gate=is_single_gate,
                           is_additive_highway=is_additive_highway,
-                          Generator=Generator,
-                          is_round=gating == "custom")
+                          Generator=Generator)
 
     value_kwargs = dict(output_size=value_size,
                         is_highway=is_highway,
                         highway_kwargs=highway_kwargs,
-                        sigma_noise=value_noise_sigma)
+                        Generator=Generator)
 
     encoder = EncoderRNN(len(src.vocab),
                          max_len,
@@ -250,19 +247,15 @@ def get_seq2seq_model(src,
 
     rounder_mu_kwargs = dict(name=rounder_mu)
     rounder_mu_kwargs.update(rounders_kwars[rounder_mu])
-    rounder_weights_kwargs = dict(name=rounder_weights)
-    rounder_weights_kwargs.update(rounders_kwars[rounder_weights])
 
     mu_kwargs = dict(rounder_mu_kwargs=rounder_mu_kwargs,
-                     is_l0_bb_weights=is_l0_bb_weights,
-                     is_reg_clamp_mu=is_reg_clamp_mu,
-                     rounder_weights_kwargs=rounder_weights_kwargs)
+                     is_reg_clamp_mu=is_reg_clamp_mu)
 
     location_kwargs = dict(n_steps_prepare_pos=n_steps_prepare_pos,
                            pdf=positioning_method,
                            Generator=Generator,
                            mu_kwargs=mu_kwargs,
-                           gating=gating)
+                           pretrained_locator=pretrained_locator)
 
     content_kwargs = dict(scorer=content_method)
 

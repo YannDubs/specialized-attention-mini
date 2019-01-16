@@ -40,10 +40,10 @@ class LocationOnlyAttender(Module):
             By default `nn.Linear`.
         hidden_size (int, optional): number of neurones to use in the hidden layer
             of the weighter.
-        gating ({None, "residual", "highway", "custom"}, optional): Gating
+        gating ({None, "residual", "highway", "gates_res"}, optional): Gating
             mechanism for generated values. `None` no gating. `"residual"` adds
             the new value to the previous. `"highway"` gating using convex
-            combination. `"custom"` gates the previous value and add the new one.
+            combination. `"gates_res"` gates the previous value and add the new one.
         sigma_kwargs (dictionary, optional): additional arguments to the
             `SigmaGenerator`.
         mu_kwargs (dictionary, optional): additional arguments to the
@@ -56,6 +56,7 @@ class LocationOnlyAttender(Module):
                  Generator=nn.Linear,
                  hidden_size=64,
                  gating="gated_res",
+                 pretrained_locator=None,
                  sigma_kwargs={},
                  mu_kwargs={}):
         super().__init__()
@@ -65,6 +66,7 @@ class LocationOnlyAttender(Module):
         self.n_steps_prepare_pos = n_steps_prepare_pos
         self.pdf = pdf
         self.gating = gating
+        self.pretrained_locator = pretrained_locator
 
         self.rel_counter = torch.arange(0, self.max_len,
                                         dtype=torch.float,
@@ -81,8 +83,6 @@ class LocationOnlyAttender(Module):
                                         Generator=Generator,
                                         gating=self.gating,
                                         n_steps_prepare_pos=n_steps_prepare_pos,
-                                        is_add_content=False,
-                                        is_add_old_attn=False,
                                         **mu_kwargs)
 
         self.sigma_generator = SigmaGenerator(hidden_size,
@@ -95,10 +95,40 @@ class LocationOnlyAttender(Module):
 
         self.reset_parameters()
 
+        if self.pretrained_locator is not None:
+            self.load_locator(self.pretrained_locator)
+
+    def reset_parameters(self):
+        """Reset and initialize the module parameters."""
+        if self.pretrained_locator is None:
+            # only reset param if not pretrained
+            super().reset_parameters()
+
     def extra_repr(self):
         return get_extra_repr(self,
                               always_shows=["pdf"],
                               conditional_shows=["gating"])
+
+    def load_locator(self, file):
+        """
+        Loads a pretrained locator (output from self.save_locator) for transfer
+        learning.
+        """
+        locator = torch.load(file)
+        self.weighter.load_state_dict(locator["weighter"])
+        self.mu_generator.load_state_dict(locator["mu_generator"])
+        self.sigma_generator.load_state_dict(locator["sigma_generator"])
+        self.hidden0 = locator["hidden0"]
+        self.pdf = locator["pdf"]
+
+    def save_locator(self, file):
+        """Save the pretrained locator to a file."""
+        locator = dict(weighter=self.weighter.state_dict(),
+                       hidden0=self.hidden0,
+                       mu_generator=self.mu_generator.state_dict(),
+                       sigma_generator=self.sigma_generator.state_dict(),
+                       pdf=self.pdf)
+        torch.save(locator, file)
 
     def forward(self, keys, query, source_lengths, step, controller=None):
         """Compute and return the location attention.
@@ -136,6 +166,7 @@ class LocationOnlyAttender(Module):
         loc_attn = self._compute_attn(mu, sigma, source_lengths)
 
         self.add_to_test([loc_attn], ["loc_attention"])
+        self.storer["old_attn"] = loc_attn
 
         return loc_attn
 
@@ -156,7 +187,10 @@ class LocationOnlyAttender(Module):
          self.storer["weighter_hidden"]) = self.weighter(weighter_inputs,
                                                          self.storer["weighter_hidden"])
 
-        mu = self.mu_generator(weighter_out, step, source_lengths_tensor)
+        # for this the mean attn actually corresponds to mu which would be easier
+        # to give, but as the focus in on the both attentions lets use the mean attn
+        old_attn = self.storer["old_attn"] if step != 0 else None
+        mu = self.mu_generator(weighter_out, step, source_lengths_tensor, old_attn)
 
         sigma = self.sigma_generator(weighter_out, mu, step)
 

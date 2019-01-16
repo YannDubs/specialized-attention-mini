@@ -584,8 +584,6 @@ class L0Gates(Module):
         initial_gates (float or list, optional): initial expected sum of gates
             to use. If scalar then simply adds `initial_gate/n_gates` to each.
             If vector then specify the inital expected gate for every gate.
-        rounding_kwargs (dictionary, optional): additional arguments to the
-            `ConcreteRounder`.
         kwargs:
             Additional arguments to the gate generator.
     """
@@ -681,7 +679,6 @@ class Highway(Module):
                  is_additive_highway=False,
                  Generator=nn.Linear,
                  save_name=None,
-                 is_round=False,
                  **kwargs):
         super().__init__()
 
@@ -696,10 +693,6 @@ class Highway(Module):
 
         self.gate_to_prob = ProbabilityConverter(initial_probability=self.initial_gate,
                                                  **kwargs)
-
-        self.is_round = is_round
-        if self.is_round:
-            self.rounder = ConcreteRounder()
 
         self.reset_parameters()
 
@@ -727,11 +720,6 @@ class Highway(Module):
             self.add_to_test(gates, self.save_name)
             self.add_to_visualize(gates.mean(-1).mean(-1), self.save_name)
 
-        if self.is_round:
-            # round if outside of [0.1, 0.9]
-            gates = self.rounder(gates,
-                                 idcs_to_round=torch.abs(gates - 0.5) > 0.4)
-
         if self.is_additive_highway:
             x_new = x_new + (1 - gates) * x_old
         else:
@@ -753,21 +741,19 @@ def res_gate(new, old, controller):
 def get_gate(gating, *args, **kwargs):
     """Return a callable gate.
 
-    gating ({None, "residual", "highway", "custom"}, optional): Gating
+    gating ({None, "residual", "highway", "gates_res"}, optional): Gating
         mechanism for generated values. `None` no gating. `"residual"` adds
         the new value to the previous. `"highway"` gating using convex
-        combination. `"custom"` gates the previous value and add the new one.
+        combination. `"gates_res"` gates the previous value and add the new one.
     """
     if gating is None:
         return no_gate
     elif gating == "residual":
         return res_gate
     elif gating == "highway":
-        return Highway(*args, is_additive_highway=False, is_round=True, **kwargs)
+        return Highway(*args, is_additive_highway=False, **kwargs)
     elif gating == "gated_res":
-        return Highway(*args, is_additive_highway=True, is_round=False, **kwargs)
-    elif gating == "custom":
-        return Highway(*args, is_additive_highway=True, is_round=True, **kwargs)
+        return Highway(*args, is_additive_highway=True, **kwargs)
     else:
         raise ValueError("Unkown `gating={}`".format(gating))
 
