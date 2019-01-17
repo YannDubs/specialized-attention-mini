@@ -454,9 +454,21 @@ class MuGenerator(Module):
 
         self.acti_plat_int = PlateauAct(plateaus="int")
 
-        self.acti_plat_diag = PlateauAct(plateaus=[-1, 1], len_plateaus=5e-1)
-        self.acti_plat_bias = PlateauAct(plateaus=[-0.5, 0.5], len_plateaus=3e-1)
-        self.acti_plat = PlateauAct(plateaus=[0, 1], len_plateaus=3e-1)
+        self.acti_plat_diag = PlateauAct(plateaus=[-1, 1],
+                                         len_plateaus=5e-1,
+                                         #n_steps_interpolate=n_steps_prepare_pos,
+                                         #len_factor_final=2.
+                                         )
+        self.acti_plat_bias = PlateauAct(plateaus=[-0.5, 0.5],
+                                         len_plateaus=3e-1,
+                                         #n_steps_interpolate=n_steps_prepare_pos,
+                                         #len_factor_final=2.
+                                         )
+        self.acti_plat = PlateauAct(plateaus=[0, 1],
+                                    len_plateaus=3e-1,
+                                    #n_steps_interpolate=n_steps_prepare_pos,
+                                    #len_factor_final=2.
+                                    )
 
         self.loss_weights = torch.ones(self.n_building_blocks, device=device)
         self.loss_weights[self.bb_labels.index("single_step")] = 2.
@@ -552,7 +564,7 @@ class MuGenerator(Module):
                           if step == 0 else self.storer["raw_mu_weights"])
         mu_weights = self.gate(mu_weights, mu_weights_old, weighter_out)
 
-        # plateau activation or rounding
+        # plateau activation
         dict_mu_weights = dict(zip(self.bb_labels, mu_weights.unbind(-1)))
 
         for l in self.bb_labels:

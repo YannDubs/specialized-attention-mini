@@ -779,20 +779,38 @@ class PlateauAct(Module):
         len_plateaus (float or list, optional): length of each plateau. If list
             has to specify length of each plateau.
         eps (float or list, optional): minimum difference to the final
-            value to eb considered "in the plateau". If list, specify epsilon
+            value to be considered "in the plateau". If list, specify epsilon
             for each plateau. Has to be a float with `plateaus="int"`.
         negative_slope (float, optional): slope to use if `is_regularize_bounds`.
+        len_factor_final (float, optional): by how much to multiply `len_plateaus`
+            at the end of training. In between the initial and final `len_plateaus`
+            the value will be linearly interpolated. This is useful to force the
+            values to be closer to the plateaus at the end of training. If `None`,
+            keep `len_plateaus` all the time. Not used when `plateaus == "int"`.
+        n_steps_interpolate (float, optional): number of interpolation steps for
+            `len_plateaus`. Only used if `len_factor_final is not None`.
     """
 
     def __init__(self, plateaus,
                  is_leaky_bounds=True,
                  len_plateaus=2e-1,
                  eps=1e-4,
-                 negative_slope=1e-2):
+                 negative_slope=1e-2,
+                 len_factor_final=None,
+                 n_steps_interpolate=100):
 
         super(PlateauAct, self).__init__()
 
         self.plateaus = plateaus
+        self.len_factor_final = len_factor_final
+
+        if self.len_factor_final is not None:
+            if self.plateaus == "int":
+                txt = "`len_factor_final` cannot be used with `self.plateaus == 'int'`"
+                raise ValueError(txt)
+            self.get_len_factor = HyperparameterInterpolator(1,
+                                                             self.len_factor_final,
+                                                             n_steps_interpolate)
 
         if self.plateaus == "int":
             self.eps = eps
@@ -821,9 +839,10 @@ class PlateauAct(Module):
 
     def extra_repr(self):
         return get_extra_repr(self,
-                              always_shows=["plateaus"])
+                              always_shows=["plateaus"],
+                              conditional_shows=["len_factor_final"])
 
-    def forward(self, x):
+    def forward(self, x, is_update=True):
         if self.plateaus == "int":
             x = x - 0.5
             rounded = x.detach().round()
@@ -834,8 +853,14 @@ class PlateauAct(Module):
             if len(self.plateaus) < 2:
                 raise ValueError("`len(plateaus) = {}`< 2.".format(len(self.plateaus)))
 
+            if self.len_factor_final is not None:
+                len_factor = self.get_len_factor(is_update)
+            else:
+                len_factor = 1.
+
             out = self.out
             for mid, h, l, eps in zip(self.mipoints, self.heights, self.len_plateaus, self.eps):
+                l = l * len_factor
                 t = self.get_temp(h, h, l / 2, eps=eps)
                 out = out + self.sigmoid(x, shiftx=mid, temperature=t, height=h)
 

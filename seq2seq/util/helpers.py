@@ -35,8 +35,10 @@ def clamp(x,
     Clamps a tensor to the given [minimum, maximum] (leaky) bound, with
     an optional hard clamping.
     """
-    lower_bound = (minimum + negative_slope * x) if is_leaky else torch.zeros_like(x) + minimum
-    upper_bound = (maximum + negative_slope * x) if is_leaky else torch.zeros_like(x) + maximum
+    lower_bound = ((minimum + negative_slope * (x - minimum))
+                   if is_leaky else torch.zeros_like(x) + minimum)
+    upper_bound = ((maximum + negative_slope * (x - maximum))
+                   if is_leaky else torch.zeros_like(x) + maximum)
     clamped = torch.max(lower_bound, torch.min(x, upper_bound))
 
     if hard_min is not None or hard_max is not None:

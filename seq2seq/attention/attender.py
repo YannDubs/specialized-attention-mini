@@ -13,9 +13,8 @@ from torch.nn.parameter import Parameter
 
 from seq2seq.util.helpers import (renormalize_input_length, batch_reduction_f,
                                   get_extra_repr, format_source_lengths)
-from seq2seq.util.torchextend import (MLP, ConcreteRounder, get_rounder,
-                                      StochasticRounder, get_gate, PlateauAct,
-                                      ProbabilityConverter)
+from seq2seq.util.torchextend import (MLP, ConcreteRounder, get_rounder, get_gate,
+                                      StochasticRounder, ProbabilityConverter)
 from seq2seq.util.initialization import weights_init
 from seq2seq.util.base import Module
 from seq2seq.attention.content import ContentAttender
