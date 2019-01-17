@@ -85,7 +85,6 @@ def get_seq2seq_model(src,
                       value_noise_sigma=0,
                       n_steps_prepare_pos=None,
                       positioning_method="gaussian",
-                      anneal_min_sigma=0.1,
                       rate_start_round=0.05,
                       anneal_temp_round=0.1,
                       rounder_mu="concrete",
@@ -97,7 +96,8 @@ def get_seq2seq_model(src,
                       is_viz_train=False,
                       attender="attender",
                       is_reg_clamp_mu=True,  # DEV MODE
-                      pretrained_locator=None  # DEV MODE
+                      pretrained_locator=None,  # DEV MODE
+                      gating="gated_res",
                       ):
     """Return a initialized extrapolator model.
 
@@ -154,12 +154,6 @@ def get_seq2seq_model(src,
             `gaussian` works best.
         is_posrnn (bool, optional): whether to use a rnn for the positional
             attention generator.
-        anneal_min_sigma (float, optional): if not 0 , it will force
-            the network to keep a higher sigma while it's learning. min_sigma will
-            actually start at `initial_sigma` and will linearly decrease at each
-            training calls, until it reaches the given `min_sigma`. This parameter
-            defines the percentage of training calls before the mdoel should reach
-            the final `min_sigma`.
         is_building_blocks_mu (bool, optional): whether to use building blocks to
             generate the positional mu rather than using a normal MLP.
         is_bb_bias (bool, optional): adding a bias term to the building blocks.
@@ -255,7 +249,8 @@ def get_seq2seq_model(src,
                            pdf=positioning_method,
                            Generator=Generator,
                            mu_kwargs=mu_kwargs,
-                           pretrained_locator=pretrained_locator)
+                           pretrained_locator=pretrained_locator,
+                           gating=gating)
 
     content_kwargs = dict(scorer=content_method)
 
@@ -331,6 +326,7 @@ def train(train_path,
           rate_prepare_pos=0.05,
           plateau_reduce_lr=[4, 0.5],
           _initial_model="initial_model",
+          pretrained_locator=None,  # DEV MODE
           **kwargs):
     """Trains the model given all parameters.
 
@@ -502,6 +498,16 @@ def train(train_path,
     if (optim is None or optim == "adam") and is_amsgrad:
         optimizer_kwargs["amsgrad"] = True
 
+    if pretrained_locator is None:
+        optim_params = None
+    else:
+        _, loc_params = zip(*seq2seq.decoder.attender.named_params_locator())
+        optim_params = [
+            {"params": loc_params, "lr": 1e-4},  # 10x slower update
+            {"params": p for p in seq2seq.parameters() if not
+             any([p is loc_p for loc_p in loc_params])},
+        ]
+
     seq2seq, history, other = trainer.train(seq2seq,
                                             train,
                                             num_epochs=epochs,
@@ -511,7 +517,8 @@ def train(train_path,
                                             learning_rate=lr,
                                             resume=resume,
                                             checkpoint_path=checkpoint_path,
-                                            top_k=1)
+                                            top_k=1,
+                                            optim_params=optim_params)
 
     latest_model = get_latest_file(output_dir)
     if os.path.join(output_dir, _initial_model) == latest_model:

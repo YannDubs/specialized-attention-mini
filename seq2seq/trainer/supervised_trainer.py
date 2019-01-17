@@ -358,7 +358,9 @@ class SupervisedTrainer(object):
               checkpoint_path=None,
               top_k=5,
               optimizer_kwargs={"max_grad_norm": 5},
-              is_oneshot=False):
+              is_oneshot=False,
+              optim_params=None  # DEV MODE
+              ):
         """ Run training for a given model.
 
         Args:
@@ -400,8 +402,9 @@ class SupervisedTrainer(object):
             start_epoch = 1
             step = 0
 
+            params = optim_params if optim_params is not None else model.parameters()
             self.optimizer = Optimizer(get_optim(optimizer),
-                                       model.parameters(),
+                                       params,
                                        lr=learning_rate,
                                        **optimizer_kwargs)
 

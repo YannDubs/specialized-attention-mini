@@ -14,7 +14,8 @@ from torch.nn.parameter import Parameter
 from seq2seq.util.helpers import (renormalize_input_length, batch_reduction_f,
                                   get_extra_repr, format_source_lengths)
 from seq2seq.util.torchextend import (MLP, ConcreteRounder, get_rounder,
-                                      StochasticRounder, get_gate, PlateauAct)
+                                      StochasticRounder, get_gate, PlateauAct,
+                                      ProbabilityConverter)
 from seq2seq.util.initialization import weights_init
 from seq2seq.util.base import Module
 from seq2seq.attention.content import ContentAttender
@@ -86,7 +87,7 @@ class Attender(Module):
         self.add_to_visualize([conf_content, conf_loc], ["content_confidence", "loc_confidence"])
         self.add_to_test([content_attn, loc_attn], ["content_attention", "loc_attention"])
 
-        attn = self.attn_mixer(content_attn, loc_attn, step,
+        attn = self.attn_mixer(content_attn, loc_attn,
                                conf_content=conf_content,
                                conf_loc=conf_loc,
                                controller=controller)
@@ -104,6 +105,11 @@ class Attender(Module):
     def save_locator(self, file):
         """Save the pretrained locator to a file."""
         self.location_attender.save_locator(file)
+
+    def named_params_locator(self):
+        """Return a generator of named parameters and parameters of the location
+        attender"""
+        return self.location_attender.named_parameters()
 
 
 class AttentionMixer(Module):
@@ -130,10 +136,6 @@ class AttentionMixer(Module):
             will use `dflt_perc_loc`.
         default_perc_loc (float, optional): constant positional percentage to
             use while `n_steps_wait`.
-        gating ({None, "residual", "highway", "gates_res"}, optional): Gating
-            mechanism for generated values. `None` no gating. `"residual"` adds
-            the new value to the previous. `"highway"` gating using convex
-            combination. `"gates_res"` gates the previous value and add the new one.
         rounder_perc_kwargs (dictionary, optional): Additional arguments to
             the percentage rounder.
     """
@@ -143,7 +145,6 @@ class AttentionMixer(Module):
                  Generator=nn.Linear,
                  n_steps_wait=0,
                  dflt_perc_loc=0.5,
-                 gating="gated_res",
                  rounder_perc_kwargs={}):
 
         super().__init__()
@@ -153,15 +154,12 @@ class AttentionMixer(Module):
         self.dflt_perc_loc = torch.tensor(dflt_perc_loc,
                                           dtype=torch.float,
                                           device=device)
-        self.gate = get_gate(gating, controller_size, 1, is_single_gate=True)
 
         self.rounder_perc = get_rounder(**rounder_perc_kwargs)  # DEV MODE
 
-        if self.rounder_perc is None:
-            self.acti_plat = PlateauAct(plateaus=[-1, 1], len_plateaus=5e-1)
-
         if self.mode == "generate":
             self.generator = Generator(controller_size, 1)
+            self.to_proba = ProbabilityConverter()
 
         self.reset_parameters()
 
@@ -169,7 +167,7 @@ class AttentionMixer(Module):
         return get_extra_repr(self,
                               always_shows=["mode"])
 
-    def forward(self, content_attn, loc_attn, old_attn,
+    def forward(self, content_attn, loc_attn,
                 conf_content=None,
                 conf_loc=None,
                 controller=None):
@@ -195,6 +193,7 @@ class AttentionMixer(Module):
                 perc_loc = (conf_loc / (conf_loc + conf_content)).unsqueeze(-1)
             elif self.mode == "generate":
                 perc_loc = self.generator(controller)
+                perc_loc = self.to_proba(perc_loc)
             else:
                 raise ValueError("Unkown mode={}".format(self.mode))
         else:
@@ -203,8 +202,6 @@ class AttentionMixer(Module):
 
         if self.rounder_perc is not None:
             perc_loc = self.rounder_perc(perc_loc)
-        else:
-            perc_loc = self.acti_plat(perc_loc)
 
         # Convex combination
         attn = (loc_attn * perc_loc) + ((1 - perc_loc) * content_attn)

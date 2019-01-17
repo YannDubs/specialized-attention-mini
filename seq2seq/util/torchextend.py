@@ -584,6 +584,10 @@ class L0Gates(Module):
         initial_gates (float or list, optional): initial expected sum of gates
             to use. If scalar then simply adds `initial_gate/n_gates` to each.
             If vector then specify the inital expected gate for every gate.
+        gating ({None, "residual", "highway", "gates_res"}, optional): Gating
+            mechanism for generated values. `None` no gating. `"residual"` adds
+            the new value to the previous. `"highway"` gating using convex
+            combination. `"gates_res"` gates the previous value and add the new one.
         kwargs:
             Additional arguments to the gate generator.
     """
@@ -593,14 +597,14 @@ class L0Gates(Module):
                  is_at_least_1=False,
                  Generator=nn.Linear,
                  initial_gates=0.,
-                 is_gate_old=False,  # DEV MODE
+                 gating="gated_res",
                  **kwargs):
         super().__init__()
 
         self.input_size = input_size
         self.output_size = output_size
         self.is_at_least_1 = is_at_least_1
-        self.is_gate_old = is_gate_old
+        self.gating = gating
         self.gate_generator = Generator(self.input_size, self.output_size,
                                         **kwargs)
 
@@ -610,32 +614,35 @@ class L0Gates(Module):
 
         self.gate_to_prob = ProbabilityConverter()
 
-        if self.is_gate_old:
-            self.old_gater = get_gate("gated_res", input_size, self.output_size,
+        if self.gating is not None:
+            self.old_gater = get_gate(self.gating, input_size, self.output_size,
                                       save_name="l0_old_gate")
 
         self.reset_parameters()
 
     def reset_parameters(self):
-        if self.is_gate_old:
+        if self.gating is not None:
             self.gates0 = Parameter(self.initial_gates)
         super().reset_parameters()
 
     def extra_repr(self):
         return get_extra_repr(self,
                               always_shows=["input_size", "output_size"],
-                              conditional_shows=["is_at_least_1", "is_gate_old"])
+                              conditional_shows=["is_at_least_1", "gating"])
 
     def forward(self, x, loss_weights=None, is_reset=True):
         gates = self.gate_generator(x)
         gates = gates + self.initial_gates
-        gates = self.gate_to_prob(gates)
 
-        if self.is_gate_old:
-            gates_old = (self.gate_to_prob(self.gates0.expand_as(gates))
-                         if is_reset else self.storer["gates_old"])
+        if self.gating is not None:
+            gates_old = (self.gates0.expand_as(gates)
+                         if is_reset else self.storer["raw_gates_old"])
             gates = self.old_gater(gates, gates_old, x)
-            self.storer["gates_old"] = gates
+            # gates old is actually before being clamped to [0,1]
+            # such that using residual gates still make sense
+            self.storer["raw_gates_old"] = gates
+
+        gates = self.gate_to_prob(gates)
 
         to_reg = gates if loss_weights is None else gates * loss_weights
         loss = batch_reduction_f(to_reg, torch.mean)

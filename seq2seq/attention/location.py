@@ -379,16 +379,16 @@ class SigmaGenerator(Module):
             # if still annealing min sigma don't backprop to sigma generator
             sigma = current_min_sigma + torch.zeros_like(mu)
         else:
-            sigma_old = (self.sigma0.expand_as(mu) if step == 0
-                         else self.storer["sigma_old"])
-            unclamped_sigma = self.gate(self.sigma_generator(weighter_out),
-                                        sigma_old, weighter_out)
-            sigma = clamp(unclamped_sigma,
+            raw_sigma_old = (self.sigma0.expand_as(mu) if step == 0
+                             else self.storer["raw_sigma_old"])
+            raw_sigma = self.gate(self.sigma_generator(weighter_out),
+                                  raw_sigma_old, weighter_out)
+            self.storer["raw_sigma_old"] = raw_sigma
+            sigma = clamp(raw_sigma,
                           minimum=self.min_sigma,
                           is_leaky=True,
                           negative_slope=0.1,
                           hard_min=self.hard_min_sigma)
-            self.storer["sigma_old"] = sigma
 
         return sigma
 
@@ -439,6 +439,7 @@ class MuGenerator(Module):
         self.max_len = max_len
         self.n_steps_prepare_pos = n_steps_prepare_pos
         self.is_reg_clamp_mu = is_reg_clamp_mu
+        self.gating = gating
 
         # Building blocks
         self.single_step = torch.tensor(1. / (self.max_len - 1)).to(device)
@@ -448,7 +449,7 @@ class MuGenerator(Module):
 
         self.mu_weights_generator = Generator(hidden_size, self.n_building_blocks)
 
-        self.gate = get_gate(gating, hidden_size, self.n_building_blocks,
+        self.gate = get_gate(self.gating, hidden_size, self.n_building_blocks,
                              is_single_gate=False, save_name="mu_gates")
 
         self.acti_plat_int = PlateauAct(plateaus="int")
@@ -464,7 +465,7 @@ class MuGenerator(Module):
         self.linear_l0_weights = L0Gates(hidden_size, self.n_building_blocks,
                                          is_at_least_1=True,
                                          initial_gates=1.,
-                                         is_gate_old=True)  # DEV MODE
+                                         gating=self.gating)
 
         self.rounder_mu = get_rounder(**rounder_mu_kwargs)
 
@@ -482,7 +483,8 @@ class MuGenerator(Module):
 
     def extra_repr(self):
         return get_extra_repr(self,
-                              always_shows=["is_reg_clamp_mu"])
+                              always_shows=["is_reg_clamp_mu"],
+                              conditional_shows=["gating"])
 
     def reset_parameters(self):
         """Reset and initialize the module parameters."""
@@ -544,8 +546,10 @@ class MuGenerator(Module):
                 (batch_size, n_queries, n_building_blocks).
         """
         # gate
+        self.storer["raw_mu_weights"] = mu_weights
+
         mu_weights_old = (self.old_weights0.expand_as(mu_weights)
-                          if step == 0 else self.storer["mu_weights"])
+                          if step == 0 else self.storer["raw_mu_weights"])
         mu_weights = self.gate(mu_weights, mu_weights_old, weighter_out)
 
         # plateau activation or rounding
@@ -575,9 +579,9 @@ class MuGenerator(Module):
         ordered_weights = [dict_mu_weights[l] for l in self.bb_labels]
         mu_weights = torch.stack(ordered_weights, dim=2)
 
-        # TO UPDATE
-        # when using l0 gating no need of having weight for cont / total_attn/
-        # pos because will be either 1 or 0 (gated)
+        # TO CLEAN
+        # when using l0 gating no need of having weight for mean_attn_old
+        # because will be either 1 or 0 (gated)
         remove = torch.ones_like(mu_weights)
         remove[:, :, :-3] = 0.
         mu_weights = mu_weights * remove + 1 - remove
@@ -592,8 +596,6 @@ class MuGenerator(Module):
         self.add_to_test([mu_weights, gates], ['ungated_weights', "bb_gates"])
 
         mu_weights = (mu_weights * gates)
-
-        self.storer["mu_weights"] = mu_weights
 
         return mu_weights
 

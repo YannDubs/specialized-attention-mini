@@ -130,6 +130,11 @@ class LocationOnlyAttender(Module):
                        pdf=self.pdf)
         torch.save(locator, file)
 
+    def named_params_locator(self):
+        """Return a generator of named parameters and parameters of the location
+        attender"""
+        return self.named_parameters()
+
     def forward(self, keys, query, source_lengths, step, controller=None):
         """Compute and return the location attention.
 
