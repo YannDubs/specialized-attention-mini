@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 from torch.nn.parameter import Parameter
 
-from seq2seq.util.initialization import linear_init
+from seq2seq.util.initialization import linear_init, init_param
 from seq2seq.util.helpers import (get_extra_repr, identity, clamp, Clamper,
                                   HyperparameterInterpolator, batch_reduction_f,
                                   bound_probability)
@@ -610,7 +610,8 @@ class L0Gates(Module):
 
         if not isinstance(initial_gates, list):
             initial_gates = [initial_gates / output_size] * output_size
-        self.initial_gates = torch.tensor(initial_gates, dtype=torch.float, device=device)
+        self.initial_gates = torch.tensor(initial_gates, dtype=torch.float,
+                                          device=device)
 
         self.gate_to_prob = ProbabilityConverter()
 
@@ -622,7 +623,7 @@ class L0Gates(Module):
 
     def reset_parameters(self):
         if self.gating is not None:
-            self.gates0 = Parameter(self.initial_gates)
+            self.gates0 = init_param(Parameter(self.initial_gates)) + self.initial_gates
         super().reset_parameters()
 
     def extra_repr(self):

@@ -28,19 +28,22 @@ class ContentAttender(Module):
 
     Args:
         kq_size (int): key and query size.
-        scorer({'multiplicative', "additive", "euclidean", "scaledot", "cosine"}, optional):
+        scorer({'multiplicative', "additive", "euclidean", "scaledot", "cosine",
+            "kq"}, optional):
             The method to compute the alignment. `"scaledot" [Vaswani et al., 2017]
             mitigates the high dimensional issue by rescaling the dot product.
             `"additive"` is the original  attention [Bahdanau et al., 2015].
             `"multiplicative"` is faster and more space efficient [Luong et al., 2015]
             but performs a little bit worst for high dimensions. `"cosine"` cosine
-            distance. `"euclidean"` Euclidean distance.
+            distance. `"euclidean"` Euclidean distance. "kq" first uses 2 different
+            mlps to convert the encoder and decoder hidden state to low dimensional
+            key and queries.
     """
 
-    def __init__(self, kq_size, scorer="multiplicative"):
+    def __init__(self, kq_size, scorer="multiplicative", max_len=50):
         super().__init__()
 
-        self.scorer = get_scorer(scorer, kq_size)
+        self.scorer = get_scorer(scorer, kq_size, max_len=max_len)
 
         # low initial temperature because logits can take a very high range of values
         # so don't want to have vanishing gradients from the start
@@ -58,7 +61,7 @@ class ContentAttender(Module):
     def extra_repr(self):
         pass
 
-    def forward(self, keys, queries):
+    def forward(self, keys, queries, step):
         """Compute the content attention.
 
         Args:
@@ -73,7 +76,7 @@ class ContentAttender(Module):
             confidence (torch.tensor): tensor of size (batch_size, n_queries)
                 containing the content confidence.
         """
-        logits = self.scorer(keys, queries)
+        logits = self.scorer(keys, queries, step=step)
 
         max_logit = logits.logsumexp(dim=-1)
 
@@ -84,17 +87,10 @@ class ContentAttender(Module):
         self.add_to_test([logits, max_logit],
                          ["logits", "max_logit"])
 
-        # TEST
-        batch_size, n_queries, kq_size = queries.size()
-        n_keys = keys.size(1)
-        assert attn.size() == (batch_size, n_queries, n_keys)
-        assert confidence.size() == (batch_size, n_queries)
-        assert logits.size() == (batch_size, n_queries, n_keys)
-
         return attn, confidence
 
 
-def get_scorer(scorer, kq_size):
+def get_scorer(scorer, kq_size, max_len):
     """
     Set scorer that matches key and query to compute attention along `dim=1`.
     """
@@ -112,6 +108,8 @@ def get_scorer(scorer, kq_size):
         scorer = MetricScorer(metric="l1")
     elif scorer == "kq":
         scorer = KQScorer(kq_size)
+    elif scorer == "transformer":
+        scorer = TransformerScore(kq_size, max_len=max_len)
     else:
         raise ValueError("Unknown attention method {}".format(scorer))
 
@@ -138,7 +136,7 @@ class MultiplicativeScorer(Module):
 
         self.reset_parameters()
 
-    def forward(self, keys, queries):
+    def forward(self, keys, queries, step=None):
         transformed_queries = self.linear(queries)
         logits = self.dot(keys, transformed_queries)
         return logits
@@ -157,19 +155,18 @@ class KQScorer(Module):
         logits: `(batch_size, n_queries, n_keys)`
     """
 
-    def __init__(self, dim, kq_size=32):
+    def __init__(self, dim, kq_size=32, Generator=MLP):
         super().__init__()
-        self.key_mlp = MLP(dim, kq_size, hidden_size=kq_size)
-        self.query_mlp = MLP(dim, kq_size, hidden_size=kq_size)
-        self.dot = DotScorer(is_scale=False)
+        self.key_generator = Generator(dim, kq_size)
+        self.query_generator = Generator(dim, kq_size)
+        self.dot = DotScorer(is_scale=True)
 
         self.reset_parameters()
 
-    def forward(self, keys, queries):
-        batch_size, n_queries, kq_size = queries.size()
+    def forward(self, keys, queries, step=None):
 
-        keys = self.key_mlp(keys)
-        queries = self.query_mlp(queries)
+        keys = self.key_generator(keys)
+        queries = self.query_generator(queries)
 
         logits = self.dot(keys, queries)
         return logits
@@ -197,7 +194,7 @@ class AdditiveScorer(Module):
 
         self.reset_parameters()
 
-    def forward(self, keys, queries):
+    def forward(self, keys, queries, step=None):
         batch_size, n_queries, kq_size = queries.size()
         n_keys = keys.size(1)
 
@@ -229,7 +226,7 @@ class DotScorer(Module):
         super().__init__()
         self.is_scale = is_scale
 
-    def forward(self, keys, queries):
+    def forward(self, keys, queries, step=None):
         logits = torch.bmm(queries, keys.transpose(1, 2))
 
         if self.is_scale:
@@ -275,7 +272,7 @@ class MetricScorer(Module):
         return get_extra_repr(self,
                               always_shows=["metric"])
 
-    def forward(self, keys, queries):
+    def forward(self, keys, queries, step=None):
         batch_size, n_queries, kq_size = queries.size()
         n_keys = keys.size(1)
 
@@ -289,4 +286,61 @@ class MetricScorer(Module):
         else:
             logits = self.similarity(keys, queries)
 
+        return logits
+
+
+class TransformerScore(Module):
+    def __init__(self, dim, max_len=50):
+        """
+        Shape:
+
+            logits: `(batch_size, n_queries, n_keys)`
+        """
+        super().__init__()
+
+        self.dim = dim
+        self.max_len = max_len
+
+        self.pos_enc = self._get_pos_encoding()
+        self.scorer = KQScorer(dim,
+                               kq_size=64,
+                               Generator=nn.Linear)
+
+        self.reset_parameters()
+
+    def extra_repr(self):
+        pass
+
+    def _get_pos_encoding(self):
+        """Return the sinusoidal position encodings."""
+
+        pos_enc = torch.zeros(self.max_len, self.dim, dtype=torch.float)
+        counter = torch.arange(0, self.max_len, dtype=torch.float).unsqueeze(1)
+        two_i_d = torch.arange(0, self.dim, 2, dtype=torch.float) / self.dim
+        # in log domain for math stability
+        denom = torch.exp(two_i_d * math.log(10000.0))
+
+        # apply sin on 0th,2nd,4th...emb_dim
+        pos_enc[:, 0::2] = torch.sin(counter / denom)
+        # apply cos on 1st,3rd,5th...emb_dim
+        pos_enc[:, 1::2] = torch.cos(counter / denom)
+        return pos_enc.unsqueeze(0).to(device)
+
+    def forward(self, keys, queries, step):
+        """Compute the transformer content + position attention.
+
+        Args:
+            keys (torch.tensor): tensor of size (batch_size, n_keys, kq_size)
+                containing the keys.
+            queries (torch.tensor): tensor of size (batch_size, n_queries, kq_size)
+                containing the queries.
+            step (int): position of first query step (i.e positions :
+                `step:step+n_queries`)
+        """
+        n_keys = keys.size(1)
+        batch_size, n_queries, kq_size = queries.size()
+
+        keys = keys + self.pos_enc[:, :n_keys, :]
+        queries = queries + self.pos_enc[:, step:step + n_queries, :]
+        logits = self.scorer(keys, queries)
         return logits

@@ -134,8 +134,16 @@ def get_seq2seq_model(src,
             with a carry weight got th residue. I.e if `True` the carry weight will
             only be applied to the residue and will not scale the new value with
             `1-carry`.
-        content_method ({"dot", "hard", "mlp"}, optional): content attention
-            function to use.
+        content_method ({'multiplicative', "additive", "euclidean", "scaledot",
+            "cosine", "kq"}, optional):
+            The method to compute the alignment. `"scaledot" [Vaswani et al., 2017]
+            mitigates the high dimensional issue by rescaling the dot product.
+            `"additive"` is the original  attention [Bahdanau et al., 2015].
+            `"multiplicative"` is faster and more space efficient [Luong et al., 2015]
+            but performs a little bit worst for high dimensions. `"cosine"` cosine
+            distance. `"euclidean"` Euclidean distance. "kq" first uses 2 different
+            mlps to convert the encoder and decoder hidden state to low dimensional
+            key and queries.
         values_size (int, optional): size of the generated value. -1 means same
             as hidden size. Can also give percentage of hidden size betwen 0 and 1.
         value_noise_sigma (float, optional): relative noise to add to

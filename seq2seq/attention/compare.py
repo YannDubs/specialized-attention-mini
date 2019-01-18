@@ -246,7 +246,7 @@ class ContentOnlyAttender(Module):
     def __init__(self, controller_size, max_len=None, scorer="multiplicative"):
         super().__init__()
 
-        self.scorer = get_scorer(scorer, controller_size)
+        self.scorer = get_scorer(scorer, controller_size, max_len=max_len)
 
         self.reset_parameters()
 
@@ -267,7 +267,7 @@ class ContentOnlyAttender(Module):
             attn (torch.tensor): tensor of size (batch_size, n_queries, n_keys)
                 containing the content attention.
         """
-        logits = self.scorer(keys, queries)
+        logits = self.scorer(keys, queries, step)
 
         attn = logits.softmax(dim=-1)
 

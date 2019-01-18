@@ -18,7 +18,7 @@ from seq2seq.util.helpers import (renormalize_input_length, get_rnn, get_extra_r
                                   HyperparameterCurriculumInterpolator, get_indices,
                                   regularization_loss, batch_reduction_f)
 from seq2seq.util.torchextend import get_rounder, L0Gates, get_gate, PlateauAct
-from seq2seq.util.initialization import replicate_hidden0
+from seq2seq.util.initialization import replicate_hidden0, init_param
 from seq2seq.util.base import Module
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -36,6 +36,7 @@ def get_regularizers_location(total_training_calls, n_steps_prepare_pos):
 
     _initialize_regularizer("pos_clamp_mu",
                             [dict(step=0, value=5e-2)])
+
 
     _initialize_regularizer("pos_const_weights",
                             [dict(step=int(n_steps_prepare_pos / 10), value=5e-2),
@@ -419,6 +420,11 @@ class MuGenerator(Module):
         useful as if the mu completely overshoots it will be hard for it to
         come back to normal values if it needs to. It also makes sense to
         output what you want rather than relying on postpropressing.
+    clipping_step (int, optional): maximum single step that can be taken by the
+        network this has the same interpretation of k in "Self-Attention with
+        Relative Position Representations" where they use a default of 2. If
+        `None` then no clipping is used.
+    weight_bias (dictionary, optional): initial building block weights.
     rounder_mu_kwargs (dictionary, optional): additional arguments to the
         rounder mu. Rounding is desirable to make the position attention
         look at the correct position even for sentences longer than it have
@@ -431,6 +437,11 @@ class MuGenerator(Module):
                  gating="gated_res",
                  n_steps_prepare_pos=100,
                  is_reg_clamp_mu=True,
+                 clipping_step=2,
+                 weight_bias=dict(mean_attn_old=0,
+                                  diagonal=0.,
+                                  single_step=0.,
+                                  bias=0),
                  rounder_mu_kwargs={},
                  ):
 
@@ -446,28 +457,35 @@ class MuGenerator(Module):
         self.bias = torch.tensor(1.0).to(device)
         self.bb_labels = ["mean_attn_old", "diagonal", "single_step", "bias"]
         self.n_building_blocks = len(self.bb_labels)
+        self.weight_bias = torch.tensor([weight_bias[l] for l in self.bb_labels],
+                                        device=device, dtype=torch.float)
 
         self.mu_weights_generator = Generator(hidden_size, self.n_building_blocks)
 
         self.gate = get_gate(self.gating, hidden_size, self.n_building_blocks,
                              is_single_gate=False, save_name="mu_gates")
 
-        self.acti_plat_int = PlateauAct(plateaus="int")
+        if clipping_step is None:
+            plateaus_step = None
+        else:
+            plateaus_step = list(range(-clipping_step, clipping_step + 1))
+
+        self.acti_plat_step = PlateauAct(plateaus=plateaus_step)
 
         self.acti_plat_diag = PlateauAct(plateaus=[-1, 1],
                                          len_plateaus=5e-1,
-                                         #n_steps_interpolate=n_steps_prepare_pos,
-                                         #len_factor_final=2.
+                                         # n_steps_interpolate=n_steps_prepare_pos,
+                                         # len_factor_final=2.
                                          )
         self.acti_plat_bias = PlateauAct(plateaus=[-0.5, 0.5],
                                          len_plateaus=3e-1,
-                                         #n_steps_interpolate=n_steps_prepare_pos,
-                                         #len_factor_final=2.
+                                         # n_steps_interpolate=n_steps_prepare_pos,
+                                         # len_factor_final=2.
                                          )
         self.acti_plat = PlateauAct(plateaus=[0, 1],
                                     len_plateaus=3e-1,
-                                    #n_steps_interpolate=n_steps_prepare_pos,
-                                    #len_factor_final=2.
+                                    # n_steps_interpolate=n_steps_prepare_pos,
+                                    # len_factor_final=2.
                                     )
 
         self.loss_weights = torch.ones(self.n_building_blocks, device=device)
@@ -500,11 +518,9 @@ class MuGenerator(Module):
 
     def reset_parameters(self):
         """Reset and initialize the module parameters."""
-        weights = [0.25, 0.25, 0, 0.]
-        self.mean_attn_old0 = Parameter(torch.tensor(0.))
+        self.mean_attn_old0 = init_param(Parameter(torch.tensor(0.)))
 
-        self.weights = torch.tensor(weights)
-        self.old_weights0 = Parameter(self.weights)
+        self.old_weights0 = init_param(Parameter(self.weight_bias)) + self.weight_bias
 
         if self.is_reg_clamp_mu:
             self.get_clamping_eps.reset_parameters()
@@ -527,7 +543,7 @@ class MuGenerator(Module):
         """
         batch_size, n_queries, _ = weighter_out.size()
 
-        raw_mu_weights = self.mu_weights_generator(weighter_out) + self.weights  # DEV MODE
+        raw_mu_weights = self.mu_weights_generator(weighter_out) + self.weight_bias
 
         mu_weights = self._transform_weights(raw_mu_weights, step, weighter_out)
 
@@ -571,7 +587,7 @@ class MuGenerator(Module):
             if l == "diagonal":
                 dict_mu_weights[l] = self.acti_plat_diag(dict_mu_weights[l])
             elif l == "single_step":
-                dict_mu_weights[l] = self.acti_plat_int(dict_mu_weights[l])
+                dict_mu_weights[l] = self.acti_plat_step(dict_mu_weights[l])
             elif l == "bias":
                 dict_mu_weights[l] = self.acti_plat_bias(dict_mu_weights[l])
             elif l == "mean_attn_old":
@@ -579,7 +595,8 @@ class MuGenerator(Module):
             else:
                 raise ValueError("Unkown label={}".format(l))
 
-        # regularizes single step
+        # regularizes single step # DEV MODE
+        """
         if self.is_regularize:
             loss = batch_reduction_f(regularization_loss(dict_mu_weights["single_step"],
                                                          p=1,
@@ -587,6 +604,7 @@ class MuGenerator(Module):
                                                          min_x=1.),
                                      torch.mean)
             self.add_regularization_loss("pos_const_weights", loss)
+        """
 
         ordered_weights = [dict_mu_weights[l] for l in self.bb_labels]
         mu_weights = torch.stack(ordered_weights, dim=2)
