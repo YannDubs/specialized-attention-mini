@@ -36,7 +36,7 @@ def get_regularizers_location(total_training_calls, n_steps_prepare_pos):
 
     _initialize_regularizer("pos_mu_gates",
                             [dict(step=int(n_steps_prepare_pos / 2), value=0),
-                             dict(step=n_steps_prepare_pos, value=1e-3)])
+                             dict(step=n_steps_prepare_pos, value=3e-3)])
 
     _initialize_regularizer("pos_clamp_mu", [dict(step=0, value=1e-2)])
 

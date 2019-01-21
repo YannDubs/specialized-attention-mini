@@ -736,7 +736,7 @@ class Highway(Module):
             x_new = gates * x_new + (1 - gates) * x_old
 
         if self.is_reg:
-            loss = batch_reduction_f(gates, torch.mean)
+            loss = 1 - batch_reduction_f(gates, torch.mean)
             return x_new, loss
         else:
             return x_new
