@@ -589,7 +589,7 @@ class L0Gates(Module):
             the new value to the previous. `"highway"` gating using convex
             combination. `"gates_res"` gates the previous value and add the new one.
         kwargs:
-            Additional arguments to the gate generator.
+            Additional arguments to the Generator.
     """
 
     def __init__(self,
@@ -687,6 +687,7 @@ class Highway(Module):
                  is_additive_highway=False,
                  Generator=nn.Linear,
                  save_name=None,
+                 is_reg=False,  # DEV MODE
                  **kwargs):
         super().__init__()
 
@@ -695,6 +696,7 @@ class Highway(Module):
         self.is_single_gate = is_single_gate
         self.is_additive_highway = is_additive_highway
         self.save_name = save_name
+        self.is_reg = is_reg
 
         self.n_gates = 1 if self.is_single_gate else n_gates
         self.gate_generator = Generator(self.controller_size, self.n_gates)
@@ -733,7 +735,11 @@ class Highway(Module):
         else:
             x_new = gates * x_new + (1 - gates) * x_old
 
-        return x_new
+        if self.is_reg:
+            loss = batch_reduction_f(gates, torch.mean)
+            return x_new, loss
+        else:
+            return x_new
 
 
 def no_gate(new, old, controller):

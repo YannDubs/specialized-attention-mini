@@ -98,6 +98,11 @@ def get_seq2seq_model(src,
                       is_reg_clamp_mu=True,  # DEV MODE
                       pretrained_locator=None,  # DEV MODE
                       gating="gated_res",
+                      is_diagonal=True,  # DEV MODE
+                      clipping_step=2,  # DEV MODE
+                      is_rnn_loc=True,  # DEV MODE
+                      is_l0=True,  # DEV MODE
+                      is_reg_mu_gates=False,  # DEV MODE
                       ):
     """Return a initialized extrapolator model.
 
@@ -251,14 +256,19 @@ def get_seq2seq_model(src,
     rounder_mu_kwargs.update(rounders_kwars[rounder_mu])
 
     mu_kwargs = dict(rounder_mu_kwargs=rounder_mu_kwargs,
-                     is_reg_clamp_mu=is_reg_clamp_mu)
+                     is_reg_clamp_mu=is_reg_clamp_mu,
+                     is_diagonal=is_diagonal,
+                     clipping_step=clipping_step,
+                     is_l0=is_l0,
+                     is_reg_mu_gates=is_reg_mu_gates)
 
     location_kwargs = dict(n_steps_prepare_pos=n_steps_prepare_pos,
                            pdf=positioning_method,
                            Generator=Generator,
                            mu_kwargs=mu_kwargs,
                            pretrained_locator=pretrained_locator,
-                           gating=gating)
+                           gating=gating,
+                           is_recurrent=is_rnn_loc)
 
     content_kwargs = dict(scorer=content_method)
 

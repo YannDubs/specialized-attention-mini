@@ -10,7 +10,7 @@ from torch.nn.utils.rnn import pad_sequence
 from seq2seq.util.helpers import (renormalize_input_length, get_rnn, get_extra_repr,
                                   clamp, format_source_lengths,
                                   HyperparameterInterpolator)
-from seq2seq.util.torchextend import get_rounder, L0Gates
+from seq2seq.util.torchextend import get_rounder, L0Gates, MLP
 from seq2seq.util.initialization import replicate_hidden0
 from seq2seq.util.base import Module
 from seq2seq.attention.location import SigmaGenerator, get_loc_pdf, MuGenerator
@@ -58,7 +58,9 @@ class LocationOnlyAttender(Module):
                  gating="gated_res",
                  pretrained_locator=None,
                  sigma_kwargs={},
-                 mu_kwargs={}):
+                 mu_kwargs={},
+                 is_recurrent=True,  # DEV MODE
+                 ):
         super().__init__()
 
         self.controller_size = controller_size
@@ -67,6 +69,7 @@ class LocationOnlyAttender(Module):
         self.pdf = pdf
         self.gating = gating
         self.pretrained_locator = pretrained_locator
+        self.is_recurrent = is_recurrent
 
         self.rel_counter = torch.arange(0, self.max_len,
                                         dtype=torch.float,
@@ -74,9 +77,12 @@ class LocationOnlyAttender(Module):
 
         self.resizer = nn.Linear(self.controller_size, hidden_size)
 
-        self.weighter, self.hidden0 = get_rnn("gru", hidden_size, hidden_size,
-                                              batch_first=True,
-                                              is_get_hidden0=True)
+        if self.is_recurrent:
+            self.weighter, self.hidden0 = get_rnn("gru", hidden_size, hidden_size,
+                                                  batch_first=True,
+                                                  is_get_hidden0=True)
+        else:
+            self.weighter = MLP(hidden_size, hidden_size)
 
         self.mu_generator = MuGenerator(hidden_size,
                                         max_len=max_len,
@@ -184,13 +190,16 @@ class LocationOnlyAttender(Module):
             sigma (torch.FloatTensor): standard deviation of location. Shape:
                 (batch_size, n_queries, 1)
         """
-        if step == 0:
-            batch_size = weighter_inputs.size(0)
-            self.storer["weighter_hidden"] = replicate_hidden0(self.hidden0, batch_size)
+        if self.is_recurrent:
+            if step == 0:
+                batch_size = weighter_inputs.size(0)
+                self.storer["weighter_hidden"] = replicate_hidden0(self.hidden0, batch_size)
 
-        (weighter_out,
-         self.storer["weighter_hidden"]) = self.weighter(weighter_inputs,
-                                                         self.storer["weighter_hidden"])
+            (weighter_out,
+             self.storer["weighter_hidden"]) = self.weighter(weighter_inputs,
+                                                             self.storer["weighter_hidden"])
+        else:
+            weighter_out = self.weighter(weighter_inputs)
 
         # for this the mean attn actually corresponds to mu which would be easier
         # to give, but as the focus in on the both attentions lets use the mean attn

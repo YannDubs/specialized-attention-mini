@@ -137,6 +137,8 @@ class AttentionMixer(Module):
             use while `n_steps_wait`.
         rounder_perc_kwargs (dictionary, optional): Additional arguments to
             the percentage rounder.
+        kwargs:
+            additional arguments to the Generator.
     """
 
     def __init__(self, controller_size,
@@ -144,7 +146,8 @@ class AttentionMixer(Module):
                  Generator=nn.Linear,
                  n_steps_wait=0,
                  dflt_perc_loc=0.5,
-                 rounder_perc_kwargs={}):
+                 rounder_perc_kwargs={},
+                 **kwargs):
 
         super().__init__()
 
@@ -157,7 +160,7 @@ class AttentionMixer(Module):
         self.rounder_perc = get_rounder(**rounder_perc_kwargs)  # DEV MODE
 
         if self.mode == "generate":
-            self.generator = Generator(controller_size, 1)
+            self.generator = Generator(controller_size, 1, **kwargs)
             self.to_proba = ProbabilityConverter()
 
         self.reset_parameters()

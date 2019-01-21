@@ -31,16 +31,14 @@ def get_regularizers_location(total_training_calls, n_steps_prepare_pos):
     max_p_interpolators = dict()
 
     _initialize_regularizer("pos_l0_weights",
-                            [dict(step=int(n_steps_prepare_pos / 10), value=0),
-                             dict(step=n_steps_prepare_pos, value=5e-3)])
-
-    _initialize_regularizer("pos_clamp_mu",
-                            [dict(step=0, value=5e-2)])
-
-
-    _initialize_regularizer("pos_const_weights",
-                            [dict(step=int(n_steps_prepare_pos / 10), value=5e-2),
+                            [dict(step=int(n_steps_prepare_pos / 2), value=0),
                              dict(step=n_steps_prepare_pos, value=1e-3)])
+
+    _initialize_regularizer("pos_mu_gates",
+                            [dict(step=int(n_steps_prepare_pos / 2), value=0),
+                             dict(step=n_steps_prepare_pos, value=1e-3)])
+
+    _initialize_regularizer("pos_clamp_mu", [dict(step=0, value=1e-2)])
 
     return max_p_interpolators
 
@@ -321,6 +319,8 @@ class SigmaGenerator(Module):
          should be in the range ~[2,6], 5 being a good general default. Indeed,
          it's a high sigma but up to length 50, can still have different
          attention => can learn (min when len = 50 : 1.2548e-21).
+    kwargs:
+        Additional arguments to the Generator.
     """
 
     def __init__(self,
@@ -329,10 +329,11 @@ class SigmaGenerator(Module):
                  Generator=nn.Linear,
                  gating="gated_res",
                  min_sigma=0.41,
-                 initial_sigma=5.0):
+                 initial_sigma=5.0,
+                 **kwargs):
 
         super().__init__()
-        self.sigma_generator = Generator(hidden_size, 1)
+        self.sigma_generator = Generator(hidden_size, 1, **kwargs)
         # start close to final annealing value => no big difference in values
         self.gate = get_gate(gating, hidden_size, 1,
                              initial_gate=0.1, save_name="sigma_gate")
@@ -429,6 +430,8 @@ class MuGenerator(Module):
         rounder mu. Rounding is desirable to make the position attention
         look at the correct position even for sentences longer than it have
         ever seen.
+    kwargs:
+        Additional arguments to the Generator.
     """
 
     def __init__(self, hidden_size,
@@ -443,6 +446,10 @@ class MuGenerator(Module):
                                   single_step=0.,
                                   bias=0),
                  rounder_mu_kwargs={},
+                 is_diagonal=True,  # DEV MODE
+                 is_l0=True,  # DEV MODE
+                 is_reg_mu_gates=False,  # DEV MODE
+                 **kwargs
                  ):
 
         super().__init__()
@@ -450,23 +457,32 @@ class MuGenerator(Module):
         self.max_len = max_len
         self.n_steps_prepare_pos = n_steps_prepare_pos
         self.is_reg_clamp_mu = is_reg_clamp_mu
-        self.gating = gating
+        self.gating = gating if not is_reg_mu_gates else "highway"
+        self.is_l0 = is_l0
+        self.is_reg_mu_gates = is_reg_mu_gates
 
         # Building blocks
         self.single_step = torch.tensor(1. / (self.max_len - 1)).to(device)
         self.bias = torch.tensor(1.0).to(device)
-        self.bb_labels = ["mean_attn_old", "diagonal", "single_step", "bias"]
+        if is_diagonal:
+            self.bb_labels = ["mean_attn_old", "diagonal", "single_step", "bias"]
+        else:
+            self.bb_labels = ["mean_attn_old", "single_step", "bias"]
         self.n_building_blocks = len(self.bb_labels)
         self.weight_bias = torch.tensor([weight_bias[l] for l in self.bb_labels],
                                         device=device, dtype=torch.float)
 
-        self.mu_weights_generator = Generator(hidden_size, self.n_building_blocks)
+        self.mu_weights_generator = Generator(hidden_size, self.n_building_blocks,
+                                              **kwargs)
 
         self.gate = get_gate(self.gating, hidden_size, self.n_building_blocks,
-                             is_single_gate=False, save_name="mu_gates")
+                             is_single_gate=False, save_name="mu_gates",
+                             is_reg=self.is_reg_mu_gates,
+                             # is_round=self.is_reg_mu_gates. TO TEST
+                             )
 
         if clipping_step is None:
-            plateaus_step = None
+            plateaus_step = "int"
         else:
             plateaus_step = list(range(-clipping_step, clipping_step + 1))
 
@@ -492,10 +508,11 @@ class MuGenerator(Module):
         self.loss_weights[self.bb_labels.index("single_step")] = 2.
         self.loss_weights[self.bb_labels.index("bias")] = 2.
 
-        self.linear_l0_weights = L0Gates(hidden_size, self.n_building_blocks,
-                                         is_at_least_1=True,
-                                         initial_gates=1.,
-                                         gating=self.gating)
+        if self.is_l0:
+            self.linear_l0_weights = L0Gates(hidden_size, self.n_building_blocks,
+                                             is_at_least_1=True,
+                                             initial_gates=1.,
+                                             gating=self.gating)
 
         self.rounder_mu = get_rounder(**rounder_mu_kwargs)
 
@@ -578,9 +595,14 @@ class MuGenerator(Module):
 
         mu_weights_old = (self.old_weights0.expand_as(mu_weights)
                           if step == 0 else self.storer["raw_mu_weights"])
-        mu_weights = self.gate(mu_weights, mu_weights_old, weighter_out)
+        if self.is_reg_mu_gates:
+            mu_weights, loss = self.gate(mu_weights, mu_weights_old, weighter_out)
+            if self.is_regularize:
+                self.add_regularization_loss("pos_mu_gates", loss)
+        else:
+            mu_weights = self.gate(mu_weights, mu_weights_old, weighter_out)
 
-        # plateau activation
+            # plateau activation
         dict_mu_weights = dict(zip(self.bb_labels, mu_weights.unbind(-1)))
 
         for l in self.bb_labels:
@@ -595,37 +617,27 @@ class MuGenerator(Module):
             else:
                 raise ValueError("Unkown label={}".format(l))
 
-        # regularizes single step # DEV MODE
-        """
-        if self.is_regularize:
-            loss = batch_reduction_f(regularization_loss(dict_mu_weights["single_step"],
-                                                         p=1,
-                                                         dim=-1,
-                                                         min_x=1.),
-                                     torch.mean)
-            self.add_regularization_loss("pos_const_weights", loss)
-        """
-
         ordered_weights = [dict_mu_weights[l] for l in self.bb_labels]
         mu_weights = torch.stack(ordered_weights, dim=2)
 
-        # TO CLEAN
-        # when using l0 gating no need of having weight for mean_attn_old
-        # because will be either 1 or 0 (gated)
-        remove = torch.ones_like(mu_weights)
-        remove[:, :, :-3] = 0.
-        mu_weights = mu_weights * remove + 1 - remove
+        if self.is_l0:
+            # TO CLEAN
+            # when using l0 gating no need of having weight for mean_attn_old
+            # because will be either 1 or 0 (gated)
+            remove = torch.ones_like(mu_weights)
+            remove[:, :, :-3] = 0.
+            mu_weights = mu_weights * remove + 1 - remove
 
-        gates, loss = self.linear_l0_weights(weighter_out,
-                                             is_reset=step == 0,
-                                             loss_weights=self.loss_weights)
-        if self.is_regularize:
-            self.add_regularization_loss("pos_l0_weights", loss)
+            gates, loss = self.linear_l0_weights(weighter_out,
+                                                 is_reset=step == 0,
+                                                 loss_weights=self.loss_weights)
+            if self.is_regularize:
+                self.add_regularization_loss("pos_l0_weights", loss)
 
-        self.add_to_visualize(gates.sum(-1).mean(), "bb_gates")
-        self.add_to_test([mu_weights, gates], ['ungated_weights', "bb_gates"])
+            self.add_to_visualize(gates.sum(-1).mean(), "bb_gates")
+            self.add_to_test([mu_weights, gates], ['ungated_weights', "bb_gates"])
 
-        mu_weights = (mu_weights * gates)
+            mu_weights = (mu_weights * gates)
 
         return mu_weights
 

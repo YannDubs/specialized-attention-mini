@@ -110,6 +110,8 @@ def get_scorer(scorer, kq_size, max_len):
         scorer = KQScorer(kq_size)
     elif scorer == "transformer":
         scorer = TransformerScore(kq_size, max_len=max_len)
+    elif scorer == "transformerxl":
+        scorer = TransformerXLScore(kq_size, max_len=max_len)
     else:
         raise ValueError("Unknown attention method {}".format(scorer))
 
@@ -119,6 +121,9 @@ def get_scorer(scorer, kq_size, max_len):
 class MultiplicativeScorer(Module):
     """
     Multiplicative scorer for attention [Luong et al., 2015].
+
+    Args:
+        dim (int): key and query size.
 
     Note:
         - Only difference is that adds bias.
@@ -149,16 +154,26 @@ class KQScorer(Module):
     """
     Key Query scorer.
 
+    Args:
+        dim (int): key and query size.
+        kq_size (int, optional): effective key and query size to use (after
+            transformation).
+        Generator (Module, optional): module to generate various values. It
+            should be callable using `Generator(input_size, output_size)(x)`.
+            By default `nn.Linear`.
+        kwargs:
+            Additional arguments to the Generator.
+
     Shape:
         keys: `(batch_size, n_keys, kq_size)`
         queries: `(batch_size, n_queries, kq_size)`
         logits: `(batch_size, n_queries, n_keys)`
     """
 
-    def __init__(self, dim, kq_size=32, Generator=MLP):
+    def __init__(self, dim, kq_size=32, Generator=MLP, **kwargs):
         super().__init__()
-        self.key_generator = Generator(dim, kq_size)
-        self.query_generator = Generator(dim, kq_size)
+        self.key_generator = Generator(dim, kq_size, **kwargs)
+        self.query_generator = Generator(dim, kq_size, **kwargs)
         self.dot = DotScorer(is_scale=True)
 
         self.reset_parameters()
@@ -178,6 +193,9 @@ class KQScorer(Module):
 class AdditiveScorer(Module):
     """
     Additive scorer for the original attention [Bahdanau et al., 2015].
+
+    Args:
+        dim (int): key and query size.
 
     Note:
         - Only difference is that adds bias.
@@ -289,19 +307,47 @@ class MetricScorer(Module):
         return logits
 
 
+def get_sin_pos_enc(dim, max_len):
+    """Return the sinusoidal position encodings.
+
+    Args:
+        dim (int): number of different sinusoidals corresponding to the dimension
+            of the vector to which to add the positional embeddings.
+        max_len (int, optional): maximum possible length of any source sentence.
+    """
+
+    pos_enc = torch.zeros(max_len, dim, dtype=torch.float)
+    counter = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+    two_i_d = torch.arange(0, dim, 2, dtype=torch.float) / dim
+    # in log domain for math stability
+    denom = torch.exp(two_i_d * math.log(10000.0))
+
+    # apply sin on 0th,2nd,4th...emb_dim
+    pos_enc[:, 0::2] = torch.sin(counter / denom)
+    # apply cos on 1st,3rd,5th...emb_dim
+    pos_enc[:, 1::2] = torch.cos(counter / denom)
+    return pos_enc.unsqueeze(0).to(device)
+
+
 class TransformerScore(Module):
     def __init__(self, dim, max_len=50):
         """
-        Shape:
+        Content attention with sinusoidal positioning like in the transformer
+        [Vaswani et al., 2017].
 
-            logits: `(batch_size, n_queries, n_keys)`
+        Args:
+            dim (int): key and query size.
+            max_len (int, optional): maximum possible length of any source sentence.
+
+        Note:
+            - Only difference is that adds bias.
         """
         super().__init__()
 
         self.dim = dim
         self.max_len = max_len
 
-        self.pos_enc = self._get_pos_encoding()
+        self.pos_enc = get_sin_pos_enc(self.dim, self.max_len)
         self.scorer = KQScorer(dim,
                                kq_size=64,
                                Generator=nn.Linear)
@@ -310,21 +356,6 @@ class TransformerScore(Module):
 
     def extra_repr(self):
         pass
-
-    def _get_pos_encoding(self):
-        """Return the sinusoidal position encodings."""
-
-        pos_enc = torch.zeros(self.max_len, self.dim, dtype=torch.float)
-        counter = torch.arange(0, self.max_len, dtype=torch.float).unsqueeze(1)
-        two_i_d = torch.arange(0, self.dim, 2, dtype=torch.float) / self.dim
-        # in log domain for math stability
-        denom = torch.exp(two_i_d * math.log(10000.0))
-
-        # apply sin on 0th,2nd,4th...emb_dim
-        pos_enc[:, 0::2] = torch.sin(counter / denom)
-        # apply cos on 1st,3rd,5th...emb_dim
-        pos_enc[:, 1::2] = torch.cos(counter / denom)
-        return pos_enc.unsqueeze(0).to(device)
 
     def forward(self, keys, queries, step):
         """Compute the transformer content + position attention.
@@ -336,6 +367,10 @@ class TransformerScore(Module):
                 containing the queries.
             step (int): position of first query step (i.e positions :
                 `step:step+n_queries`)
+
+        Return
+            logits (torch.tensor): tensor of size (batch_size, n_queries, n_keys)
+                containing the logits that score the key-query matching.
         """
         n_keys = keys.size(1)
         batch_size, n_queries, kq_size = queries.size()
@@ -343,4 +378,70 @@ class TransformerScore(Module):
         keys = keys + self.pos_enc[:, :n_keys, :]
         queries = queries + self.pos_enc[:, step:step + n_queries, :]
         logits = self.scorer(keys, queries)
+        return logits
+
+
+class TransformerXLScore(Module):
+    def __init__(self, dim, max_len=50, kq_size=64):
+        """
+        Content attention with improved sinusoidal positioning like in the
+        TRANSFORMER-XL [Dai et al., 2019].
+
+        Args:
+            dim (int): key and query size.
+            max_len (int, optional): maximum possible length of any source sentence.
+        """
+        super().__init__()
+
+        self.dim = dim
+        self.max_len = max_len
+        self.kq_size = kq_size
+
+        self.pos_enc = get_sin_pos_enc(self.dim, self.max_len)
+        self.key_cont_generator = nn.Linear(dim, dim)
+        self.key_loc_generator = nn.Linear(dim, dim)
+        self.query_generator = nn.Linear(dim, dim)
+        self.dot = DotScorer(is_scale=True)
+
+        self.reset_parameters()
+
+    def extra_repr(self):
+        pass
+
+    def forward(self, keys, queries, step):
+        """Compute the transformer content + position attention.
+
+        Args:
+            keys (torch.tensor): tensor of size (batch_size, n_keys, kq_size)
+                containing the keys.
+            queries (torch.tensor): tensor of size ()
+                containing the queries.
+            step (int): position of first query step (i.e positions :
+                `step:step+n_queries`)
+
+        Return
+            logits (torch.tensor): tensor of size (batch_size, n_queries, n_keys)
+                containing the logits that score the key-query matching.
+        """
+        n_keys = keys.size(1)
+        batch_size, n_queries, kq_size = queries.size()
+
+        assert n_queries == 1  # DEV MODE
+
+        #keys = self.pos_enc[:, :n_keys, :].expand(batch_size, n_queries, n_keys, kq_size)
+        #queries = self.pos_enc[:, step:step + n_queries, :].expand(batch_size, n_queries, n_keys,kq_size)
+
+        rel_pos_enc = (self.pos_enc[:, :n_keys, :] -
+                       self.pos_enc[:, step:step + n_queries, :])
+
+        keys_cont = self.key_cont_generator(keys)
+        keys_loc = self.key_loc_generator(rel_pos_enc).expand(batch_size, n_keys, kq_size)
+        queries = self.query_generator(queries)
+
+        cont_address = self.dot(keys_cont, queries)
+        cont_loc_address = self.dot(keys_loc, queries)
+
+        # in the paper they use 4 terms but 2 correspond to the biases
+        logits = cont_address + cont_loc_address
+
         return logits
