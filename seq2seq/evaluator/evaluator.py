@@ -8,6 +8,7 @@ from seq2seq.metrics import WordAccuracy, SequenceAccuracy
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+
 class Evaluator(object):
     """ Class to evaluate models with given datasets.
 

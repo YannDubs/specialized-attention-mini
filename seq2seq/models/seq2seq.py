@@ -79,8 +79,12 @@ class Seq2seq(Module):
         # Unpack target variables
         try:
             target_output = target_variables.get('decoder_output', None)
+            # The attention target is preprended with an extra SOS step. We must remove this
+            provided_attention = (target_variables['attention_target'][:, 1:]
+                                  if 'attention_target' in target_variables else None)
         except AttributeError:
             target_output = None
+            provided_attention = None
 
         keys, values, encoder_hidden, last_enc_control_out = self.encoder(input_variable,
                                                                           input_lengths)

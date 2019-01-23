@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch
 import numpy as np
 
+import seq2seq
 from seq2seq.util.helpers import HyperparameterInterpolator, Rate2Steps, add_to_visualize
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -23,7 +24,7 @@ def _get_loss(loss_name, token_loss_weight, tgt, **kwargs):
     elif loss_name == "perplexity":
         loss = Perplexity(ignore_index=output_pad, weight=token_loss_weight, **kwargs)
     elif loss_name == "attention loss":
-        loss = AttentionLoss(ignore_index=output_pad, weight=token_loss_weight, **kwargs)
+        loss = AttentionLoss(ignore_index=seq2seq.IGNORE_INDEX, **kwargs)
     else:
         raise ValueError("Unkown loss : {}".format(loss_name))
 
@@ -135,10 +136,10 @@ class Loss(object):
         self.target = target
         self.criterion = criterion
         if not issubclass(type(self.criterion), nn.modules.loss._Loss):
-            raise ValueError("Criterion has to be a subclass of torch.nn._Loss")
+            raise ValueError(
+                "Criterion has to be a subclass of torch.nn._Loss")
         # accumulated loss
         self.acc_loss = 0
-        self.regularization_loses = dict()
         # normalization term
         self.norm_term = 0
 
@@ -152,6 +153,7 @@ class Loss(object):
         """ Reset the accumulated loss. """
         self.acc_loss = 0
         self.norm_term = 0
+
         self.regularization_loses = dict()
 
     def get_loss(self):
@@ -334,8 +336,7 @@ class NLLLoss(Loss):
                                       self._INPUTS,
                                       self._TARGETS,
                                       nn.NLLLoss(ignore_index=ignore_index,
-                                                 reduction='elementwise_mean' if size_average else 'none',
-                                                 **kwargs),
+                                                 reduction='elementwise_mean' if size_average else 'sum', **kwargs),
                                       total_training_calls=total_training_calls,
                                       max_p_interpolators=max_p_interpolators)
 
@@ -406,8 +407,7 @@ class AttentionLoss(NLLLoss):
     _TARGETS = "attention_target"
 
     def __init__(self, ignore_index=-1, **kwargs):
-        super(AttentionLoss, self).__init__(ignore_index=ignore_index,
-                                            size_average=True,
+        super(AttentionLoss, self).__init__(ignore_index=ignore_index, size_average=True,
                                             **kwargs)
 
     def eval_step(self, step_outputs, step_target):
@@ -415,5 +415,3 @@ class AttentionLoss(NLLLoss):
         outputs = torch.log(step_outputs.contiguous().view(batch_size, -1).clamp(min=1e-20))
         self.acc_loss += self.criterion(outputs, step_target)
         self.norm_term += 1
-        if self.acc_loss.item() < 0:
-            raise ValueError("The loss appears to be negative loss={}. Added:{}".format(self.acc_loss.item()), self.criterion(outputs, target))

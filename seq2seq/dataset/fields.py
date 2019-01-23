@@ -80,7 +80,7 @@ class AttentionField(torchtext.data.Field):
     Since we already define the attention vectors with integers in the data set, we don't need a vocabulary. Instead, we directly use the provided integers
     """
 
-    def __init__(self, ignore_index=-1, **kwargs):
+    def __init__(self, ignore_index, **kwargs):
         """
         Initialize the AttentionField. As pre-processing it prepends the ignore value, to account for the SOS step
 
@@ -91,7 +91,7 @@ class AttentionField(torchtext.data.Field):
         logger = logging.getLogger(__name__)
 
         if kwargs.get('batch_first') == False:
-            logger.warning("Option batch_first has to be set to use pytorch-seq2seq. Changed to True.")
+            logger.warning("Option batch_first has to be set to use machine. Changed to True.")
         kwargs['batch_first'] = True
 
         if kwargs.get('use_vocab') == True:
@@ -111,17 +111,19 @@ class AttentionField(torchtext.data.Field):
         # Batch is a 2D list with batch examples in dim-0 and sequences in dim-1
         # For each element in each example we convert from unicode string to integer.
         # PAD is converted to -1
-        def postprocess(batch, _, __):
+        def post_process_function(example, __):
             def safe_cast(cast_func, x, default):
                 try:
                     return cast_func(x)
                 except (ValueError, TypeError):
                     return default
 
-            return [[safe_cast(int, item, self.ignore_index) for item in example] for example in batch]
+            return [safe_cast(int, item, self.ignore_index) for item in example]
+
+        post_process_pipeline = torchtext.data.Pipeline(convert_token=post_process_function)
 
         kwargs['preprocessing'] = preprocess
-        kwargs['postprocessing'] = postprocess
+        kwargs['postprocessing'] = post_process_pipeline
 
         super(AttentionField, self).__init__(**kwargs)
 

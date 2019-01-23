@@ -98,11 +98,11 @@ def get_seq2seq_model(src,
                       is_reg_clamp_mu=True,  # DEV MODE
                       pretrained_locator=None,  # DEV MODE
                       gating="gated_res",
-                      is_diagonal=True,  # DEV MODE
-                      clipping_step=2,  # DEV MODE
+                      is_diagonal=False,  # DEV MODE
+                      clipping_step=3,  # DEV MODE
                       is_rnn_loc=True,  # DEV MODE
-                      is_l0=True,  # DEV MODE
-                      is_reg_mu_gates=False,  # DEV MODE
+                      is_l0=False,  # DEV MODE
+                      is_reg_mu_gates=True,  # DEV MODE
                       ):
     """Return a initialized extrapolator model.
 
@@ -436,6 +436,7 @@ def train(train_path,
         print("Cuda device set to {}".format(cuda_device))
         torch.cuda.set_device(cuda_device)
 
+    is_attnloss = "attention loss" in loss_names or "attention loss" in [n for n, _ in loss_names]
     train, dev, src, tgt, oneshot = get_train_dev(train_path,
                                                   dev_path,
                                                   max_len,
@@ -443,7 +444,27 @@ def train(train_path,
                                                   tgt_vocab,
                                                   is_predict_eos=is_predict_eos,
                                                   content_method=content_method,
-                                                  oneshot_path=oneshot_path)
+                                                  oneshot_path=oneshot_path,
+                                                  is_attnloss=is_attnloss)
+
+    # When chosen to use attentive guidance, check whether the data is correct for the first
+    # example in the data set. We can assume that the other examples are then also correct.
+    if is_attnloss:
+        if len(train) > 0:
+            if 'attn' not in vars(train[0]):
+                raise Exception("AttentionField not found in train data")
+            tgt_len = len(vars(train[0])['tgt']) - 1  # -1 for SOS
+            attn_len = len(vars(train[0])['attn']) - 1  # -1 for preprended ignore_index
+            if attn_len != tgt_len:
+                raise Exception("Length of output sequence does not equal length of attention sequence in train data")
+
+        if dev is not None and len(dev) > 0:
+            if 'attn' not in vars(dev[0]):
+                raise Exception("AttentionField not found in dev data")
+            tgt_len = len(vars(dev[0])['tgt']) - 1  # -1 for SOS
+            attn_len = len(vars(dev[0])['attn']) - 1  # -1 for preprended ignore_index
+            if attn_len != tgt_len:
+                raise Exception("Length of output sequence does not equal length of attention sequence in dev data.")
 
     total_training_calls = math.ceil(epochs * len(train) / batch_size)
     rate2steps = Rate2Steps(total_training_calls)

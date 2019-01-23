@@ -36,7 +36,7 @@ def get_regularizers_location(total_training_calls, n_steps_prepare_pos):
 
     _initialize_regularizer("pos_mu_gates",
                             [dict(step=int(n_steps_prepare_pos / 2), value=0),
-                             dict(step=n_steps_prepare_pos, value=3e-3)])
+                             dict(step=n_steps_prepare_pos, value=1e-3)])
 
     _initialize_regularizer("pos_clamp_mu", [dict(step=0, value=1e-2)])
 
@@ -441,10 +441,10 @@ class MuGenerator(Module):
                  n_steps_prepare_pos=100,
                  is_reg_clamp_mu=True,
                  clipping_step=2,
-                 weight_bias=dict(mean_attn_old=0,
+                 weight_bias=dict(mean_attn_old=0.33,
                                   diagonal=0.,
-                                  single_step=0.,
-                                  bias=0),
+                                  single_step=0.33,
+                                  bias=0.33),
                  rounder_mu_kwargs={},
                  is_diagonal=True,  # DEV MODE
                  is_l0=True,  # DEV MODE

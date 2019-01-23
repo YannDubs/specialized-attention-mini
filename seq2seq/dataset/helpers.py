@@ -1,4 +1,5 @@
 import torchtext
+import seq2seq
 
 from .fields import SourceField, TargetField, AttentionField
 
@@ -17,7 +18,7 @@ def get_tabular_data_fields(is_predict_eos=True, is_attnloss=False, content_meth
     tabular_data_fields = [('src', src), ('tgt', tgt)]
 
     if is_attnloss or content_method == 'hard':
-        attn = AttentionField(use_vocab=False)
+        attn = AttentionField(use_vocab=False, ignore_index=seq2seq.IGNORE_INDEX)
         tabular_data_fields.append(('attn', attn))
 
     return tabular_data_fields
@@ -28,7 +29,8 @@ def get_data(path, max_len, fields, format_ext='tsv'):
     def len_filter(example):
         return len(example.src) <= max_len and len(example.tgt) <= max_len
 
-    data = torchtext.data.TabularDataset(path=path, format=format_ext, fields=fields, filter_pred=len_filter)
+    data = torchtext.data.TabularDataset(path=path, format=format_ext,
+                                         fields=fields, filter_pred=len_filter)
 
     return data
 
