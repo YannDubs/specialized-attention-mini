@@ -1,8 +1,12 @@
 
 from __future__ import print_function
+
+import ipdb
+
 import math
 import warnings
 import torch.nn as nn
+from torch.nn.utils.rnn import pad_sequence
 import torch
 import numpy as np
 
@@ -25,6 +29,8 @@ def _get_loss(loss_name, token_loss_weight, tgt, **kwargs):
         loss = Perplexity(ignore_index=output_pad, weight=token_loss_weight, **kwargs)
     elif loss_name == "attention loss":
         loss = AttentionLoss(ignore_index=seq2seq.IGNORE_INDEX, **kwargs)
+    elif loss_name == "attention mse loss":
+        loss = AttentionMSELoss(ignore_index=seq2seq.IGNORE_INDEX, **kwargs)
     else:
         raise ValueError("Unkown loss : {}".format(loss_name))
 
@@ -128,7 +134,7 @@ class Loss(object):
             sub-classes.
     """
 
-    def __init__(self, name, log_name, inputs, target, criterion,
+    def __init__(self, name, log_name, inputs, target, criterion, max_len=50,
                  total_training_calls=None, max_p_interpolators=None):
         self.name = name
         self.log_name = log_name
@@ -149,6 +155,10 @@ class Loss(object):
                                     if max_p_interpolators is not None else dict())
         self.counters = {k: 0 for k, _ in self.max_p_interpolators.items()}
 
+        self.position = torch.arange(0, max_len,
+                                     dtype=torch.float,
+                                     device=device).unsqueeze(1)
+
     def reset(self):
         """ Reset the accumulated loss. """
         self.acc_loss = 0
@@ -166,7 +176,7 @@ class Loss(object):
         """
         raise NotImplementedError
 
-    def eval_batch(self, decoder_outputs, other, target_variable):
+    def eval_batch(self, decoder_outputs, other, target_variable, input_lengths):
         """ Evaluate and accumulate loss given outputs and expected results.
         This method is called after each batch with the batch outputs and
         the target (expected) results.  The loss and normalization term are
@@ -189,11 +199,19 @@ class Loss(object):
 
         targets = target_variable[self.target]
 
+        position = pad_sequence([self.position[:length]
+                                 for length in input_lengths],
+                                batch_first=True)
+
+        # ipdb.set_trace()
         for step, step_output in enumerate(outputs):
             step_target = targets[:, step + 1]
-            self.eval_step(step_output, step_target)
+            self.eval_step(step_output, step_target, position)
 
-    def eval_step(self, outputs, target):
+        if len(outputs) > 0:
+            self._post_eval_batch()
+
+    def eval_step(self, outputs, target, position):
         """ Function called by eval batch to evaluate a timestep of the batch.
         When called it updates self.acc_loss with the loss of the current step.
         Args:
@@ -201,6 +219,10 @@ class Loss(object):
             target (torch.Tensor): expected output of a batch.
         """
         raise NotImplementedError
+
+    def _post_eval_batch(self):
+        """ Function called at the end of `eval_batch` for possible postprocessing."""
+        pass
 
     def cuda(self):
         self.criterion.cuda()
@@ -219,6 +241,7 @@ class Loss(object):
     def scale_loss(self, factor):
         """ Scale loss with a factor
         """
+        # ipdb.set_trace()
         self.acc_loss = self.acc_loss * factor
         if self.acc_loss.item() < 0:
             raise ValueError("The loss appears to be negative loss={}. factor={}".format(self.acc_loss.item()), factor)
@@ -327,6 +350,7 @@ class NLLLoss(Loss):
                  size_average=True,
                  total_training_calls=None,
                  max_p_interpolators=None,
+                 max_len=50,
                  **kwargs):
         self.ignore_index = ignore_index
         self.size_average = size_average
@@ -338,7 +362,8 @@ class NLLLoss(Loss):
                                       nn.NLLLoss(ignore_index=ignore_index,
                                                  reduction='elementwise_mean' if size_average else 'sum', **kwargs),
                                       total_training_calls=total_training_calls,
-                                      max_p_interpolators=max_p_interpolators)
+                                      max_p_interpolators=max_p_interpolators,
+                                      max_len=max_len)
 
     def get_loss(self):
         if isinstance(self.acc_loss, int):
@@ -350,7 +375,7 @@ class NLLLoss(Loss):
             loss /= self.norm_term
         return loss
 
-    def eval_step(self, step_outputs, target):
+    def eval_step(self, step_outputs, target, position):
         batch_size = target.size(0)
         outputs = step_outputs.contiguous().view(batch_size, -1)
         self.acc_loss += self.criterion(outputs, target)
@@ -378,7 +403,7 @@ class Perplexity(NLLLoss):
                                          size_average=False,
                                          **kwargs)
 
-    def eval_step(self, outputs, target):
+    def eval_step(self, outputs, target, position):
         self.acc_loss += self.criterion(outputs, target)
         if self.ignore_index is -100:
             self.norm_term += np.prod(target.size())
@@ -410,8 +435,79 @@ class AttentionLoss(NLLLoss):
         super(AttentionLoss, self).__init__(ignore_index=ignore_index, size_average=True,
                                             **kwargs)
 
-    def eval_step(self, step_outputs, step_target):
+    def eval_step(self, step_outputs, step_target, position):
+
         batch_size = step_target.size(0)
         outputs = torch.log(step_outputs.contiguous().view(batch_size, -1).clamp(min=1e-20))
         self.acc_loss += self.criterion(outputs, step_target)
         self.norm_term += 1
+
+
+class AttentionMSELoss(Loss):
+    """ Cross entropy loss over attentions
+    Args:
+        ignore_index (int, optional): index of token to be masked
+        size_average (bool, optional): refer to http://pytorch.org/docs/master/nn.html#nllloss
+    """
+    _NAME = "Attention MSE Loss"
+    _SHORTNAME = "attn_mse_loss"
+    _INPUTS = "attention_score"
+    _TARGETS = "attention_target"
+
+    def __init__(self,
+                 ignore_index=-1,
+                 total_training_calls=None,
+                 max_p_interpolators=None,
+                 max_len=50,
+                 eps=1e-4,
+                 is_rmse=True,
+                 **kwargs):
+        self.ignore_index = ignore_index
+        self.len_norm_term = 0
+        self.tmp_acc_loss = 0
+        self.eps = eps
+        self.is_rmse = is_rmse
+
+        super().__init__(self._NAME,
+                         self._SHORTNAME,
+                         self._INPUTS,
+                         self._TARGETS,
+                         nn.MSELoss(reduction='none', **kwargs),
+                         total_training_calls=total_training_calls,
+                         max_p_interpolators=max_p_interpolators,
+                         max_len=max_len)
+
+    def get_loss(self):
+        # total loss for all batches
+        loss = self.acc_loss / self.norm_term
+        return loss.item()
+
+    def eval_step(self, step_outputs, step_target, position):
+        # will average first by sequence length then batch size
+        true_idx = step_target.data.ne(self.ignore_index).float()
+        self.len_norm_term += true_idx
+
+        batch_size = step_target.size(0)
+        attn = step_outputs.contiguous().view(batch_size, 1, -1)
+        mean_attn = torch.bmm(attn, position).squeeze()
+        mse = self.criterion(mean_attn, step_target.float())
+
+        # tmp_acc_loss keeps batch dimension
+        self.tmp_acc_loss += mse * true_idx
+
+    def _post_eval_batch(self):
+        # length normalization
+        acc_loss = self.tmp_acc_loss / self.len_norm_term.detach()
+        mean_acc_loss = acc_loss.mean()
+
+        if self.is_rmse:
+            # sqrt to have unit changes (don't make it too much dependent on length of seq)
+            # use eps to avoid nan loss when 0 mse
+            mean_acc_loss = torch.sqrt(mean_acc_loss + self.eps)
+
+        # batch normalization
+        self.acc_loss = self.acc_loss + mean_acc_loss
+
+        self.norm_term += 1
+        self.len_norm_term = 0
+        self.tmp_acc_loss = 0

@@ -13,7 +13,6 @@ TO - DO:
 
 import os
 import logging
-import warnings
 import math
 import json
 import shutil
@@ -30,16 +29,16 @@ from seq2seq.dataset.helpers import get_train_dev
 from seq2seq.util.callbacks import EarlyStopping
 from seq2seq.util.helpers import Rate2Steps, regularization_loss, get_latest_file
 from seq2seq.util.torchextend import MLP
-from seq2seq.attention import Attender, LocationOnlyAttender, ContentOnlyAttender
+from seq2seq.attention import (Attender, LocationOnlyAttender, ContentOnlyAttender,
+                               HardAttender)
 from seq2seq.attention.location import get_regularizers_location
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-LOG_FORMAT = '%(asctime)s %(name)-12s %(levelname)-8s %(message)s'
-log_level = "warning"
-logging.basicConfig(format=LOG_FORMAT, level=getattr(
-    logging, log_level.upper()))
+logging.basicConfig(format='%(asctime)s %(levelname)s - %(funcName)s: %(message)s',
+                    datefmt="%H:%M:%S")
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG,)
 
 
 def get_attender(name, attender_kwargs):
@@ -51,6 +50,8 @@ def get_attender(name, attender_kwargs):
     elif name == "content":
         return dict(attender=ContentOnlyAttender,
                     attender_kwargs=attender_kwargs["content_kwargs"])
+    elif name == "hard":
+        return dict(attender=HardAttender, attender_kwargs={})
     else:
         raise ValueError("Unkown name={}.".format(name))
 
@@ -67,23 +68,36 @@ def _rename_latest_file(path, new_name):
     os.rename(latest_file, os.path.join(path, new_name))
 
 
-def get_seq2seq_model(src,
-                      tgt,
+def is_add_attn(attender, loss_names):
+    """Whether to add the attention field."""
+    is_hard_attn = attender == "hard"
+    is_attn_loss = False
+    for loss_name in loss_names:
+        if isinstance(loss_name, str) and "attention" in loss_names:
+            is_attn_loss = True
+        elif "attention" in loss_name[0]:
+            is_attn_loss = True
+    return is_hard_attn or is_attn_loss
+
+
+def get_seq2seq_model(src_len,
+                      tgt_len,
                       max_len,
+                      tgt_sos_id,
+                      tgt_eos_id,
                       total_training_calls,
                       is_mlps=False,
                       embedding_size=64,
                       hidden_size=128,
                       anneal_mid_dropout=0.3,
-                      mid_noise_sigma=0,
                       is_highway=True,
-                      initial_gate=0.7,  # TO DO - medium: chose best and remove parameter
+                      initial_gate=0.3,  # TO DO - medium: chose best and remove parameter
                       is_single_gate=True,
-                      is_additive_highway=True,   # TO DO - medium: chose best and remove parameter
+                      is_additive_highway=False,   # TO DO - medium: chose best and remove parameter
                       content_method='scaledot',  # see if scaledmult better
                       value_size=-1,
                       value_noise_sigma=0,
-                      n_steps_prepare_pos=None,
+                      n_steps_prepare_pos=100,
                       positioning_method="gaussian",
                       rate_start_round=0.05,
                       anneal_temp_round=0.1,
@@ -97,18 +111,20 @@ def get_seq2seq_model(src,
                       attender="attender",
                       is_reg_clamp_mu=True,  # DEV MODE
                       pretrained_locator=None,  # DEV MODE
-                      gating="gated_res",
+                      gating="highway",  # DEV MODE
                       is_diagonal=False,  # DEV MODE
                       clipping_step=3,  # DEV MODE
                       is_rnn_loc=True,  # DEV MODE
                       is_l0=False,  # DEV MODE
                       is_reg_mu_gates=True,  # DEV MODE
+                      is_force_highway=False,  # DEV MODE
+                      location_size=64,  # DEV MODE
                       ):
     """Return a initialized extrapolator model.
 
     Args:
-        src (SourceField): source field.
-        tgt (TargetField): target field.
+        src_len (int): size of source vocab.
+        tgt_len (int): size of target vocab.
         max_len (int): maximum possible length of any source sentence.
         total_training_calls (int): number of maximum training calls.
         is_mlps (bool, optional): whether to use MLPs for the generators instead
@@ -122,15 +138,13 @@ def get_seq2seq_model(src,
             training calls, until it reaches `final_mid_dropout`. This
             parameter defines the percentage of training calls before the mdoel
             should reach `final_mid_dropout`.
-        mid_noise_sigma (float, optional) relative noise to add between the decoder
-            and encoder. This can be seen as a rough approximation to building a
-            variational latent representation as it forces the prediction of a
-            distribution rather than points.
         is_highway (bool, optional): whether to use a highway betwen the embedding
-            and the value of the encoder.
-        initial_highway (float, optional): initial highway carry rate. This can be
+            and the value of the encoder. This can be
             useful to make the network learn the attention even before the
             decoder converged.
+        initial_gate (float, optional): initial highway gate (i.e how much of the
+            value to let through compared to the embedding: smaller lets more
+            embeddings)
         is_single_carry (bool, optional): whetehr to use a one dimension carry weight
             instead of n dimensional. If a n dimension then the network can learn
             to carry some dimensions but not others. The downside is that
@@ -237,9 +251,10 @@ def get_seq2seq_model(src,
     value_kwargs = dict(output_size=value_size,
                         is_highway=is_highway,
                         highway_kwargs=highway_kwargs,
-                        Generator=Generator)
+                        Generator=Generator,
+                        is_force_highway=is_force_highway)
 
-    encoder = EncoderRNN(len(src.vocab),
+    encoder = EncoderRNN(src_len,
                          max_len,
                          hidden_size,
                          embedding_size,
@@ -268,7 +283,8 @@ def get_seq2seq_model(src,
                            mu_kwargs=mu_kwargs,
                            pretrained_locator=pretrained_locator,
                            gating=gating,
-                           is_recurrent=is_rnn_loc)
+                           is_recurrent=is_rnn_loc,
+                           hidden_size=location_size)
 
     content_kwargs = dict(scorer=content_method)
 
@@ -286,23 +302,24 @@ def get_seq2seq_model(src,
                            location_kwargs=location_kwargs,
                            mixer_kwargs=mixer_kwargs)
 
-    decoder = DecoderRNN(len(tgt.vocab),
+    decoder = DecoderRNN(tgt_len,
                          max_len,
                          hidden_size,
                          embedding_size,
-                         tgt.sos_id,
-                         tgt.eos_id,
+                         tgt_sos_id,
+                         tgt_eos_id,
                          value_size=encoder.value_size,
                          **get_attender(attender, attender_kwargs))
 
     mid_dropout_kwargs = dict(n_steps_interpolate=rate2steps(anneal_mid_dropout))
 
     seq2seq = Seq2seq(encoder, decoder,
-                      mid_dropout_kwargs=mid_dropout_kwargs,
-                      mid_noise_sigma=mid_noise_sigma)
+                      mid_dropout_kwargs=mid_dropout_kwargs)
 
     seq2seq.set_dev_mode(value=is_dev_mode)
     seq2seq.set_viz_train(value=is_viz_train)
+
+    logger.debug(str(seq2seq))
 
     return seq2seq
 
@@ -335,7 +352,6 @@ def train(train_path,
           checkpoint_path=None,
           patience=15,
           name_checkpoint=None,
-          is_attnloss=False,
           eos_weight=1,
           anneal_eos_weight=0,  # TO DO : hyperparmeter optimize
           _initial_eos_weight=0.,
@@ -344,6 +360,7 @@ def train(train_path,
           rate_prepare_pos=0.05,
           plateau_reduce_lr=[4, 0.5],
           _initial_model="initial_model",
+          attender="attender",
           pretrained_locator=None,  # DEV MODE
           **kwargs):
     """Trains the model given all parameters.
@@ -394,9 +411,6 @@ def train(train_path,
             doesn't use any early stoping.
         name_checkpoint (str, optional): name to give to the checkpoint to make
             it more human readable.
-        is_attnloss (str, optional): Whether to add attention loss, to force the
-            netwrok to learn the given attention, as seen in "Learning
-            compositionally through attentive guidance".
         eos_weight (int, optional): weight of the loss that should be given to
             the <eos> token.
         anneal_eos_weight (float, optional): if not 0 , it will force
@@ -429,27 +443,27 @@ def train(train_path,
         kwargs:
             Additional arguments to `get_seq2seq_model`.
     """
-    saved_args = locals()
     logger.setLevel(log_level.upper())
+    saved_args = locals()
 
     if torch.cuda.is_available():
-        print("Cuda device set to {}".format(cuda_device))
+        logging.info("Cuda device set to {}".format(cuda_device))
         torch.cuda.set_device(cuda_device)
 
-    is_attnloss = "attention loss" in loss_names or "attention loss" in [n for n, _ in loss_names]
+    is_attn_field = is_add_attn(attender, loss_names)
     train, dev, src, tgt, oneshot = get_train_dev(train_path,
                                                   dev_path,
                                                   max_len,
                                                   src_vocab,
                                                   tgt_vocab,
                                                   is_predict_eos=is_predict_eos,
-                                                  content_method=content_method,
                                                   oneshot_path=oneshot_path,
-                                                  is_attnloss=is_attnloss)
+                                                  is_add_attn=is_attn_field)
+    logger.debug("is_add_attn: {}".format(is_attn_field))
 
     # When chosen to use attentive guidance, check whether the data is correct for the first
     # example in the data set. We can assume that the other examples are then also correct.
-    if is_attnloss:
+    if is_attn_field:
         if len(train) > 0:
             if 'attn' not in vars(train[0]):
                 raise Exception("AttentionField not found in train data")
@@ -470,9 +484,11 @@ def train(train_path,
     rate2steps = Rate2Steps(total_training_calls)
 
     n_steps_prepare_pos = rate2steps(rate_prepare_pos)
-    seq2seq = get_seq2seq_model(src, tgt, max_len, total_training_calls,
+    seq2seq = get_seq2seq_model(len(src.vocab), len(tgt.vocab), max_len, tgt.sos_id,
+                                tgt.eos_id, total_training_calls,
                                 content_method=content_method,
                                 n_steps_prepare_pos=n_steps_prepare_pos,
+                                attender=attender,
                                 **kwargs)
 
     n_parameters = sum([p.numel() for p in seq2seq.parameters()])
@@ -489,7 +505,8 @@ def train(train_path,
     losses, loss_weights = get_losses(loss_names, tgt, is_predict_eos,
                                       eos_weight=eos_weight,
                                       total_training_calls=total_training_calls,
-                                      max_p_interpolators=max_p_interpolators)
+                                      max_p_interpolators=max_p_interpolators,
+                                      max_len=max_len)
 
     early_stopper = (EarlyStopping(patience=patience)
                      if patience is not None else None)
@@ -524,7 +541,8 @@ def train(train_path,
                                 early_stopper=early_stopper,
                                 loss_weight_updater=loss_weight_updater,
                                 teacher_forcing_kwargs=teacher_forcing_kwargs,
-                                initial_model=_initial_model)
+                                initial_model=_initial_model,
+                                log_level=log_level)
 
     optimizer_kwargs = {"max_grad_value": grad_clip_value,
                         "max_grad_norm": grad_clip_norm}

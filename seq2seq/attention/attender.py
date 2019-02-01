@@ -62,12 +62,18 @@ class Attender(Module):
     def extra_repr(self):
         pass
 
-    def forward(self, keys, query, source_lengths, step, controller=None):
+    def forward(self, keys, query,
+                source_lengths=None, step=None, controller=None, **kwargs):
         """Compute and return the final attention.
 
         Args:
             key (torch.tensor): key of size (batch_size, n_queries, kq_size).
             query (torch.tensor): query of size (batch_size, n_queries, kq_size).
+            step (int): current decoding step.
+            source_lengths (tuple(list of int, torch.FloatTesnor), optional): A
+                list that contains the lengths of sequences in the mini-batch. The
+                Tensor has the same information but is preinitialized on teh
+                correct device.
             controller (torch.tensor, optional): controller tensor of size
                 (batch_size, n_queries, kq_size) used for the generation of some
                 variables. Can be `None` if unused.
@@ -75,6 +81,10 @@ class Attender(Module):
         Return:
             attn (torch.tensor): attention of size (batch_size, n_queries, n_keys).
         """
+        assert source_lengths is not None
+        assert step is not None
+        assert controller is not None
+
         content_attn, conf_content = self.content_attender(keys, query)
         query = self.resizer(query)
         query = F.relu(query)

@@ -5,6 +5,8 @@ NOTA BENE:
 """
 
 from __future__ import division
+import ipdb  # DEV MODE
+
 import logging
 import os
 import random
@@ -23,9 +25,10 @@ from seq2seq.util.checkpoint import Checkpoint
 from seq2seq.util.callbacks import History
 from seq2seq.util.helpers import mean, HyperparameterInterpolator
 
-import math
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+logger = logging.getLogger(__name__)
 
 
 class SupervisedTrainer(object):
@@ -68,12 +71,17 @@ class SupervisedTrainer(object):
                  early_stopper=None,
                  loss_weight_updater=None,
                  teacher_forcing_kwargs={},
-                 initial_model=None):
+                 initial_model=None,
+                 log_level=None):
         self._trainer = "Simple Trainer"
         self.random_seed = random_seed
         if random_seed is not None:
             random.seed(random_seed)
             torch.manual_seed(random_seed)
+
+        self.logger = logger
+        if log_level is not None:
+            self.logger.setLevel(log_level.upper())
 
         self.loss = loss
         self.metrics = metrics
@@ -99,22 +107,22 @@ class SupervisedTrainer(object):
             os.makedirs(self.expt_dir)
         self.batch_size = batch_size
 
-        self.logger = logging.getLogger(__name__)
-
     def _train_batch(self, input_variable, input_lengths, target_variable,
                      model):
         loss = self.loss
 
         # Forward propagation
+        tf_ratio = self.teacher_forcing(True)
         decoder_outputs, decoder_hidden, other = model(input_variable,
                                                        input_lengths,
                                                        target_variable,
-                                                       teacher_forcing_ratio=self.teacher_forcing(True))
+                                                       teacher_forcing_ratio=tf_ratio)
 
         losses = self.evaluator.compute_batch_loss(decoder_outputs,
                                                    decoder_hidden,
                                                    other,
-                                                   target_variable)
+                                                   target_variable,
+                                                   input_lengths)
 
         # Backward propagation
         for i, loss in enumerate(losses, 0):
@@ -153,8 +161,6 @@ class SupervisedTrainer(object):
                        dev_data=None,
                        monitor_data=[],
                        top_k=5):
-
-        log = self.logger
         others = dict()
 
         print_loss_total = defaultdict(float)  # Reset every print_every
@@ -179,7 +185,7 @@ class SupervisedTrainer(object):
         losses, metrics = self.evaluator.evaluate(model, val_data, self.get_batch_data)
 
         total_loss, log_msg, model_name = self.get_losses(losses, metrics, step)
-        log.info(log_msg)
+        self.logger.info(log_msg)
 
         loss_best = top_k * [total_loss]
         best_checkpoints = top_k * [None]
@@ -200,10 +206,6 @@ class SupervisedTrainer(object):
             shutil.copytree(os.path.join(self.expt_dir, model_name), initial_path)
 
         for epoch in range(start_epoch, n_epochs + 1):
-
-            if epoch % 3 == 0:
-                print("Epoch: %d, Step: %d" % (epoch, step))
-            log.info("Epoch: %d, Step: %d" % (epoch, step))
 
             batch_generator = batch_iterator.__iter__()
 
@@ -237,6 +239,7 @@ class SupervisedTrainer(object):
                         sum_previous_values = (other_single_epoch["visualize"].get(k, 0) *
                                                i_visualized)
                         try:
+                            # mean value across all decoding steps
                             scalar_v = mean(v)
                         except TypeError:
                             scalar_v = v
@@ -280,7 +283,7 @@ class SupervisedTrainer(object):
                         step / total_steps * 100,
                         all_losses)
 
-                    log.info(log_msg)
+                    self.logger.info(log_msg)
 
                 # check if new model should be saved
                 if step % self.checkpoint_every == 0 or step == total_steps:
@@ -321,7 +324,7 @@ class SupervisedTrainer(object):
                 epoch_loss_total[loss.log_name] = 0
 
             loss_msg = ' '.join(['%s: %.4f' % (loss.log_name, loss.get_loss()) for loss in losses])
-            log_msg = "Finished epoch %d: Train %s" % (epoch, loss_msg)
+            log_msg = "Finished epoch %d, Step %d : Train %s" % (epoch, step, loss_msg)
 
             train_losses, metrics = self.evaluator.evaluate(model, data, self.get_batch_data)
             loss_total_train, log_, model_name = self.get_losses(train_losses, metrics, step)
@@ -335,8 +338,8 @@ class SupervisedTrainer(object):
                 model.train(mode=True)
 
                 if self.early_stopper is not None and self.early_stopper(loss_total_dev):
-                    log.info(log_msg)
-                    log.info('Terminated Training due Early Stopping at Epoch {}'.format(epoch))
+                    self.logger.info(log_msg)
+                    self.logger.info('Terminated Training due Early Stopping at Epoch {}'.format(epoch))
                     break
 
                 self.history.step(loss_total_train, loss_total_dev)
@@ -344,7 +347,8 @@ class SupervisedTrainer(object):
             else:
                 self.optimizer.update(loss_total_train, epoch)
 
-            log.info(log_msg)
+            #if epoch % 3 == 0:
+            self.logger.info(log_msg)
 
         return others
 
@@ -409,8 +413,6 @@ class SupervisedTrainer(object):
                                        **optimizer_kwargs)
 
         self.history = History(num_epochs)
-        self.logger.info("Optimizer: %s, Scheduler: %s" % (self.optimizer.optimizer,
-                                                           self.optimizer.scheduler))
 
         other = self._train_epoches(data, model, num_epochs,
                                     start_epoch, step,

@@ -609,6 +609,8 @@ def add_to_visualize(values, keys, to_visualize, is_training, training_step,
     I.e avaregae over the source length if it is dependant.
 
     The variables will then be averaged over decoding step and over batch_size.
+
+    Note : the function simpyl sets values. Doesn't append values.
     """
     if is_training:
         if training_step % save_every_n_batches == 0:

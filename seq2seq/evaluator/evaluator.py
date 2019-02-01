@@ -42,7 +42,8 @@ class Evaluator(object):
 
         return metrics
 
-    def compute_batch_loss(self, decoder_outputs, decoder_hidden, other, target_variable):
+    def compute_batch_loss(self, decoder_outputs, decoder_hidden, other,
+                           target_variable, input_lengths):
         """
         Compute the loss for the current batch.
 
@@ -60,11 +61,13 @@ class Evaluator(object):
         for loss in losses:
             loss.reset()
 
-        losses = self.update_loss(losses, decoder_outputs, decoder_hidden, other, target_variable)
+        losses = self.update_loss(losses, decoder_outputs, decoder_hidden, other,
+                                  target_variable, input_lengths)
 
         return losses
 
-    def update_loss(self, losses, decoder_outputs, decoder_hidden, other, target_variable):
+    def update_loss(self, losses, decoder_outputs, decoder_hidden, other,
+                    target_variable, input_lengths):
         """
         Update a list with losses for current batch
 
@@ -80,7 +83,7 @@ class Evaluator(object):
         """
 
         for loss in losses:
-            loss.eval_batch(decoder_outputs, other, target_variable)
+            loss.eval_batch(decoder_outputs, other, target_variable, input_lengths)
 
         return losses
 
@@ -125,7 +128,7 @@ class Evaluator(object):
                 metrics = self.update_batch_metrics(metrics, other, target_variable)
 
                 # Compute loss(es) over one batch
-                losses = self.update_loss(losses, decoder_outputs, decoder_hidden, other, target_variable)
+                losses = self.update_loss(losses, decoder_outputs, decoder_hidden, other, target_variable, input_lengths)
 
         model.train(previous_train_mode)
 

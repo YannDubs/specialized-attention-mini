@@ -1,6 +1,8 @@
 """
 Other possible attenders for comparaison purpose.
 """
+import ipdb  # Dev mode
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -14,7 +16,7 @@ from seq2seq.util.torchextend import get_rounder, L0Gates, MLP
 from seq2seq.util.initialization import replicate_hidden0
 from seq2seq.util.base import Module
 from seq2seq.attention.location import SigmaGenerator, get_loc_pdf, MuGenerator
-from seq2seq.attention.content import get_scorer
+from seq2seq.attention.content import get_scorer, scorer_filter_args
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -141,21 +143,25 @@ class LocationOnlyAttender(Module):
         attender"""
         return self.named_parameters()
 
-    def forward(self, keys, query, source_lengths, step, controller=None):
+    def forward(self, keys, query, source_lengths=None, step=None, **kwargs):
         """Compute and return the location attention.
 
         Args:
+            keys (torch.tensor): key of size (batch_size, n_keys, kq_size).
             query (torch.tensor): query of size (batch_size, n_queries, kq_size).
+            step (int): current decoding step.
             source_lengths (tuple(list of int, torch.FloatTesnor), optional): A
                 list that contains the lengths of sequences in the mini-batch. The
                 Tensor has the same information but is preinitialized on teh
                 correct device.
-            step (int): current decoding step.
 
         Return:
             loc_attn (torch.tensor): location attention. Shape: (batch_size,
                 n_queries, n_keys).
         """
+        assert source_lengths is not None
+        assert step is not None
+
         query = self.resizer(query)
         query = F.relu(query)
 
@@ -262,8 +268,7 @@ class ContentOnlyAttender(Module):
     def extra_repr(self):
         pass
 
-    def forward(self, keys, queries, source_lengths=None, step=None,
-                controller=None):
+    def forward(self, keys, queries, **kwargs):
         """Compute the content attention.
 
         Args:
@@ -276,10 +281,60 @@ class ContentOnlyAttender(Module):
             attn (torch.tensor): tensor of size (batch_size, n_queries, n_keys)
                 containing the content attention.
         """
-        logits = self.scorer(keys, queries, step)
+        kwargs = scorer_filter_args(self.scorer, **kwargs)
+
+        logits = self.scorer(keys, queries, **kwargs)
 
         attn = logits.softmax(dim=-1)
 
         self.add_to_test([attn], ["content_attention"])
+
+        return attn
+
+
+class HardAttender(Module):
+    """Hard attention for data sets that are annotated with attentive guidance.
+
+    Shape:
+        keys: `(batch_size, n_keys, kq_size)`
+        queries: `(batch_size, n_queries, kq_size)`
+        provided_attention: `(batch_size, target_len).
+        logits: `(batch_size, n_queries, n_keys)`
+    """
+
+    def extra_repr(self):
+        pass
+
+    def forward(self, keys, queries, step=None, provided_attention=None, **kwargs):
+        """Compute the content attention.
+
+        Args:
+            keys (torch.tensor): tensor of size (batch_size, n_keys, kq_size)
+                containing the keys.
+            queries (torch.tensor): tensor of size (batch_size, n_queries, kq_size)
+                containing the queries.
+            step (int): current decoding step.
+            provided_attention (LongTensor, optional): attention gauidance if using
+                hard attention of shape (batch_size, target_len).
+
+        Return:
+            attn (torch.tensor): tensor of size (batch_size, n_queries, n_keys)
+                containing the hard attention.
+        """
+        assert provided_attention is not None
+        assert step is not None
+
+        batch_size, n_queries, kq_size = queries.size()
+        n_keys = keys.size(1)
+
+        # If we have shorter examples in a batch, attend the PAD outputs to the
+        # first encoder state
+        provided_attention.masked_fill_(provided_attention.eq(-1), 0)
+        current_attn = provided_attention[:, step:step + n_queries].unsqueeze(-1)
+
+        attn = torch.full([batch_size, n_queries, n_keys],
+                          fill_value=0.,
+                          device=device)
+        attn = attn.scatter_(dim=2, index=current_attn, value=1)
 
         return attn

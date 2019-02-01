@@ -10,14 +10,14 @@ def get_single_data(columns, tabular_data_fields):
     return torchtext.data.Dataset([example], tabular_data_fields)
 
 
-def get_tabular_data_fields(is_predict_eos=True, is_attnloss=False, content_method="dot"):
+def get_tabular_data_fields(is_predict_eos=True, is_add_attn=False):
     """Gets the data fields."""
     src = SourceField()
     tgt = TargetField(include_eos=is_predict_eos)
 
     tabular_data_fields = [('src', src), ('tgt', tgt)]
 
-    if is_attnloss or content_method == 'hard':
+    if is_add_attn:
         attn = AttentionField(use_vocab=False, ignore_index=seq2seq.IGNORE_INDEX)
         tabular_data_fields.append(('attn', attn))
 
@@ -35,14 +35,13 @@ def get_data(path, max_len, fields, format_ext='tsv'):
     return data
 
 
-def get_train_dev(train_path, dev_path, max_len, src_vocab, tgt_vocab, content_method,
+def get_train_dev(train_path, dev_path, max_len, src_vocab, tgt_vocab,
                   is_predict_eos=True,
-                  is_attnloss=False,
+                  is_add_attn=False,
                   oneshot_path=None):
     """Get the fromatted train and dev data."""
-    tabular_data_fields = get_tabular_data_fields(content_method=content_method,
-                                                  is_predict_eos=is_predict_eos,
-                                                  is_attnloss=is_attnloss)
+    tabular_data_fields = get_tabular_data_fields(is_predict_eos=is_predict_eos,
+                                                  is_add_attn=is_add_attn)
 
     train = get_data(train_path, max_len, tabular_data_fields)
     dev = get_data(dev_path, max_len, tabular_data_fields)

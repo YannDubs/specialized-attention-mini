@@ -16,6 +16,8 @@ import logging
 import torch
 import dill
 
+logger = logging.getLogger(__name__)
+
 
 class Checkpoint(object):
     """
@@ -101,7 +103,6 @@ class Checkpoint(object):
         Returns:
             checkpoint (Checkpoint): checkpoint object with fields copied from those stored on disk
         """
-        logger = logging.getLogger(__name__)
         logger.info("Loading checkpoints from {}".format(path))
 
         if torch.cuda.is_available():

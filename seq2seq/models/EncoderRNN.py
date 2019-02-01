@@ -7,7 +7,7 @@ NOTA BENE:
 Contact: Yann Dubois
 """
 import math
-import warnings
+import logging
 
 import torch
 import torch.nn as nn
@@ -16,12 +16,13 @@ from torch.nn.utils.rnn import pad_sequence
 
 from .baseRNN import BaseRNN
 
-from seq2seq.util.initialization import replicate_hidden0, init_param, weights_init
+from seq2seq.util.initialization import replicate_hidden0, weights_init
 from seq2seq.util.helpers import (get_rnn, get_extra_repr, format_source_lengths)
 from seq2seq.util.base import Module
 from seq2seq.util.torchextend import ProbabilityConverter, Highway
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+logger = logging.getLogger(__name__)
 
 
 def _compute_size(size, hidden_size, name=None):
@@ -98,6 +99,8 @@ class EncoderRNN(BaseRNN):
         embedded = nn.utils.rnn.pack_padded_sequence(embedded, input_lengths_list,
                                                      batch_first=True)
 
+        # output is all hidden layers n last layer
+        # hidden is all layers at last time step
         output, hidden = self.controller(embedded, hidden)
 
         embedded = embedded_unpacked
@@ -135,16 +138,18 @@ class ValueGenerator(Module):
                  is_highway=False,
                  highway_kwargs={},
                  Generator=nn.Linear,
+                 is_force_highway=False,  # DEV MODE
                  **kwargs):
 
         super(ValueGenerator, self).__init__()
 
         self.input_size = input_size
+        self.is_force_highway = is_force_highway
         self.output_size = _compute_size(output_size, self.input_size,
                                          name="output_size - {}".format(type(self).__name__))
 
-        if is_highway and embedding_size != self.output_size:
-            warnings.warn("Using value_size == {} instead of {} because highway.".format(embedding_size, self.output_size))
+        if (is_highway or self.is_force_highway) and embedding_size != self.output_size:
+            logger.warning("Using value_size == {} instead of {} because highway.".format(embedding_size, self.output_size))
             self.output_size = embedding_size
 
         self.is_highway = is_highway
@@ -174,7 +179,10 @@ class ValueGenerator(Module):
 
         values = self.generator(input_generator)
 
-        if self.is_highway:
+        if self.is_force_highway:
+            values = embedded
+
+        elif self.is_highway:
             values = self.highway(values, embedded, input_generator)
 
         return values

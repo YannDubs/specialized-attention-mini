@@ -6,6 +6,8 @@ TO DO:
 
 Contact: Yann Dubois
 """
+import ipdb
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -112,7 +114,9 @@ class LocationAttender(Module):
                  gating="gated_res",
                  pretrained_locator=None,  # DEV MODE
                  sigma_kwargs={},
-                 mu_kwargs={}):
+                 mu_kwargs={},
+                 is_recurrent=True,  # DEV MODE
+                 ):
         super().__init__()
 
         self.query_size = query_size
@@ -376,8 +380,10 @@ class SigmaGenerator(Module):
         """
         is_update_sigma = self.training and step == 0
 
+        # run it before updating
+        is_still_annealing = self.get_sigma.is_annealing
         current_min_sigma = self.get_sigma(is_update_sigma)
-        if self.get_sigma.is_annealing:
+        if is_still_annealing:
             # if still annealing min sigma don't backprop to sigma generator
             sigma = current_min_sigma + torch.zeros_like(mu)
         else:
@@ -441,10 +447,14 @@ class MuGenerator(Module):
                  n_steps_prepare_pos=100,
                  is_reg_clamp_mu=True,
                  clipping_step=2,
-                 weight_bias=dict(mean_attn_old=0.33,
-                                  diagonal=0.,
-                                  single_step=0.33,
-                                  bias=0.33),
+                 weight_bias=dict(mean_attn_old=0.6,  # good to look at start
+                                  diagonal=0.5,
+                                  single_step=0.3,
+                                  bias=0.),  # center of pleateau
+                 weight_factor=dict(mean_attn_old=0.1,
+                                    diagonal=0.1,
+                                    single_step=0.1,
+                                    bias=0.01),
                  rounder_mu_kwargs={},
                  is_diagonal=True,  # DEV MODE
                  is_l0=True,  # DEV MODE
@@ -471,6 +481,10 @@ class MuGenerator(Module):
         self.n_building_blocks = len(self.bb_labels)
         self.weight_bias = torch.tensor([weight_bias[l] for l in self.bb_labels],
                                         device=device, dtype=torch.float)
+        # make the mu weights change relatively little at the begining
+        # as small mu weight makes a big difference
+        self.weight_factor = torch.tensor([weight_factor[l] for l in self.bb_labels],
+                                          device=device, dtype=torch.float)
 
         self.mu_weights_generator = Generator(hidden_size, self.n_building_blocks,
                                               **kwargs)
@@ -535,9 +549,11 @@ class MuGenerator(Module):
 
     def reset_parameters(self):
         """Reset and initialize the module parameters."""
-        self.mean_attn_old0 = init_param(Parameter(torch.tensor(0.)))
+        # start at 0.2 to bias looking at start
+        self.mean_attn_old0 = Parameter(torch.tensor(0.2))
 
-        self.old_weights0 = init_param(Parameter(self.weight_bias)) + self.weight_bias
+        self.old_weights0 = (init_param(Parameter(torch.ones_like(self.weight_bias))
+                                        ) * self.weight_factor) + self.weight_bias
 
         if self.is_reg_clamp_mu:
             self.get_clamping_eps.reset_parameters()
@@ -553,6 +569,8 @@ class MuGenerator(Module):
             step (int): decoding step.
             source_lengths_tensor (torch.FloatTensor): size of each source sentence
                 (batch size, ).
+            attn_old (torch.FloatTensor): location attention. Shape: (batch_size,
+                n_queries, n_keys-1). -1 because don't attend to <sos>.
 
         Return:
             mu (torch.FloatTensor): mean location attention
@@ -560,9 +578,11 @@ class MuGenerator(Module):
         """
         batch_size, n_queries, _ = weighter_out.size()
 
-        raw_mu_weights = self.mu_weights_generator(weighter_out) + self.weight_bias
+        raw_mu_weights = (self.mu_weights_generator(weighter_out) * self.weight_factor
+                          ) + self.weight_bias
 
         mu_weights = self._transform_weights(raw_mu_weights, step, weighter_out)
+        self.storer["raw_mu_weights"] = raw_mu_weights
 
         building_blocks = self._get_building_blocks(weighter_out,
                                                     source_lengths_tensor,
@@ -591,18 +611,19 @@ class MuGenerator(Module):
                 (batch_size, n_queries, n_building_blocks).
         """
         # gate
-        self.storer["raw_mu_weights"] = mu_weights
-
         mu_weights_old = (self.old_weights0.expand_as(mu_weights)
                           if step == 0 else self.storer["raw_mu_weights"])
-        if self.is_reg_mu_gates:
-            mu_weights, loss = self.gate(mu_weights, mu_weights_old, weighter_out)
-            if self.is_regularize:
-                self.add_regularization_loss("pos_mu_gates", loss)
-        else:
-            mu_weights = self.gate(mu_weights, mu_weights_old, weighter_out)
+        try:
+            if self.is_reg_mu_gates:
+                mu_weights, loss = self.gate(mu_weights, mu_weights_old, weighter_out)
+                if self.is_regularize:
+                    self.add_regularization_loss("pos_mu_gates", loss)
+            else:
+                mu_weights = self.gate(mu_weights, mu_weights_old, weighter_out)
+        except:
+            ipdb.set_trace()
 
-            # plateau activation
+        # plateau activation
         dict_mu_weights = dict(zip(self.bb_labels, mu_weights.unbind(-1)))
 
         for l in self.bb_labels:
@@ -625,7 +646,7 @@ class MuGenerator(Module):
             # when using l0 gating no need of having weight for mean_attn_old
             # because will be either 1 or 0 (gated)
             remove = torch.ones_like(mu_weights)
-            remove[:, :, :-3] = 0.
+            remove[:, :, 0:1] = 0.
             mu_weights = mu_weights * remove + 1 - remove
 
             gates, loss = self.linear_l0_weights(weighter_out,
@@ -693,8 +714,8 @@ class MuGenerator(Module):
                                                self.max_len - 1)
 
         if step == 0:
-            mean_attn_old = torch.sigmoid(self.mean_attn_old0.expand(batch_size,
-                                                                     n_queries, 1))
+            mean_attn_old = self.mean_attn_old0.expand(batch_size,
+                                                       n_queries, 1)
         else:
             mean_attn_old = torch.bmm(attn_old,
                                       rel_counter[:, :attn_old.size(2), :]
@@ -715,8 +736,7 @@ class MuGenerator(Module):
                                bias=bias,
                                single_step=single_step)
 
-        # set mu 0 to be middle
-        # not mu_old as already correct
+        # convert to the the new setup where 0 is the middle
         for l in self.bb_labels:
             if l in ["diagonal", "mean_attn_old"]:
                 building_blocks[l] = building_blocks[l] - 0.5

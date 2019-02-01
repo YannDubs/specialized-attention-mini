@@ -1,2 +1,2 @@
 from .attender import Attender
-from .compare import LocationOnlyAttender, ContentOnlyAttender
+from .compare import LocationOnlyAttender, ContentOnlyAttender, HardAttender

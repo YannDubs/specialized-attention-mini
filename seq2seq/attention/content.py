@@ -61,7 +61,7 @@ class ContentAttender(Module):
     def extra_repr(self):
         pass
 
-    def forward(self, keys, queries, step):
+    def forward(self, keys, queries, **kwargs):
         """Compute the content attention.
 
         Args:
@@ -76,7 +76,8 @@ class ContentAttender(Module):
             confidence (torch.tensor): tensor of size (batch_size, n_queries)
                 containing the content confidence.
         """
-        logits = self.scorer(keys, queries, step=step)
+        kwargs = scorer_filter_args(self.scorer, **kwargs)
+        logits = self.scorer(keys, queries, **kwargs)
 
         max_logit = logits.logsumexp(dim=-1)
 
@@ -88,6 +89,18 @@ class ContentAttender(Module):
                          ["logits", "max_logit"])
 
         return attn, confidence
+
+
+def scorer_filter_args(scorer,
+                       step=None,
+                       provided_attention=None,
+                       **kwargs):
+    """Keep only the important args given the method."""
+    kwargs = dict()
+    if isinstance(scorer, (TransformerScore, TransformerXLScore)):
+        kwargs["step"] = step
+
+    return kwargs
 
 
 def get_scorer(scorer, kq_size, max_len):
@@ -141,7 +154,7 @@ class MultiplicativeScorer(Module):
 
         self.reset_parameters()
 
-    def forward(self, keys, queries, step=None):
+    def forward(self, keys, queries):
         transformed_queries = self.linear(queries)
         logits = self.dot(keys, transformed_queries)
         return logits
@@ -178,7 +191,7 @@ class KQScorer(Module):
 
         self.reset_parameters()
 
-    def forward(self, keys, queries, step=None):
+    def forward(self, keys, queries):
 
         keys = self.key_generator(keys)
         queries = self.query_generator(queries)
@@ -212,7 +225,7 @@ class AdditiveScorer(Module):
 
         self.reset_parameters()
 
-    def forward(self, keys, queries, step=None):
+    def forward(self, keys, queries):
         batch_size, n_queries, kq_size = queries.size()
         n_keys = keys.size(1)
 
@@ -244,7 +257,7 @@ class DotScorer(Module):
         super().__init__()
         self.is_scale = is_scale
 
-    def forward(self, keys, queries, step=None):
+    def forward(self, keys, queries):
         logits = torch.bmm(queries, keys.transpose(1, 2))
 
         if self.is_scale:
@@ -290,7 +303,7 @@ class MetricScorer(Module):
         return get_extra_repr(self,
                               always_shows=["metric"])
 
-    def forward(self, keys, queries, step=None):
+    def forward(self, keys, queries):
         batch_size, n_queries, kq_size = queries.size()
         n_keys = keys.size(1)
 

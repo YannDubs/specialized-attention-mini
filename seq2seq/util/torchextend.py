@@ -7,7 +7,7 @@ To Do - medium:
 Contact: Yann Dubois
 """
 
-import warnings
+import logging
 
 import torch
 import torch.nn as nn
@@ -20,6 +20,9 @@ from seq2seq.util.helpers import (get_extra_repr, identity, clamp, Clamper,
 from seq2seq.util.base import Module
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+NO_PLATEAU_EPS = False
+logger = logging.getLogger(__name__)
 
 
 class MLP(Module):
@@ -151,11 +154,11 @@ class ProbabilityConverter(Module):
 
         if self.fix_point is not None:
             if self.activation != "hard-sigmoid":
-                warnings.warn("Can only use `fix_point` if activation=hard-sigmoid. Replace {} by 'hard-sigmoid' ".format(self.activation))
+                logger.warning("Can only use `fix_point` if activation=hard-sigmoid. Replace {} by 'hard-sigmoid' ".format(self.activation))
                 self.activation = 'hard-sigmoid'
 
             if self.is_bias:
-                warnings.warn("Cannot use bias when using `fix_point`. Setting to False and using temperature instead. ".format(self.activation))
+                logger.warning("Cannot use bias when using `fix_point`. Setting to False and using temperature instead. ".format(self.activation))
                 self.is_bias = False
                 self.is_temperature = True
 
@@ -207,7 +210,7 @@ class ProbabilityConverter(Module):
 
         p = bound_probability(full_p, self.min_p)
 
-        if self.plateau_eps is not None:
+        if self.plateau_eps is not None and not NO_PLATEAU_EPS:  # DEV Mode
             p = replace_sim(p, [0, 1], [self.plateau_eps, self.plateau_eps])
 
         return p
@@ -378,7 +381,7 @@ class AnnealedDropout(nn.Dropout):
         super().__init__(p=initial_dropout)
 
         if final_dropout is None:
-            final_dropout = 0 if n_steps_interpolate == 0 else 0.1
+            final_dropout = 0 if n_steps_interpolate == 0 else 0.3
 
         self.get_dropout_p = HyperparameterInterpolator(initial_dropout,
                                                         final_dropout,
@@ -623,7 +626,8 @@ class L0Gates(Module):
 
     def reset_parameters(self):
         if self.gating is not None:
-            self.gates0 = init_param(Parameter(self.initial_gates)) + self.initial_gates
+            self.gates0 = init_param(Parameter(torch.ones_like(self.initial_gates))
+                                     ) + self.initial_gates
         super().reset_parameters()
 
     def extra_repr(self):
@@ -687,7 +691,7 @@ class Highway(Module):
                  is_additive_highway=False,
                  Generator=nn.Linear,
                  save_name=None,
-                 is_reg=False,  # DEV MODE
+                 is_reg=False,  # DEV MODE : regularizes how much of the new goes through
                  **kwargs):
         super().__init__()
 
@@ -736,7 +740,7 @@ class Highway(Module):
             x_new = gates * x_new + (1 - gates) * x_old
 
         if self.is_reg:
-            loss = 1 - batch_reduction_f(gates, torch.mean)
+            loss = batch_reduction_f(gates, torch.mean)
             return x_new, loss
         else:
             return x_new
@@ -871,7 +875,8 @@ class PlateauAct(Module):
                 t = self.get_temp(h, h, l / 2, eps=eps)
                 out = out + self.sigmoid(x, shiftx=mid, temperature=t, height=h)
 
-            out = replace_sim(out, self.plateaus, self.eps)
+            if not NO_PLATEAU_EPS:  # DEV MODE
+                out = replace_sim(out, self.plateaus, self.eps)
 
             if self.is_leaky_bounds:
                 minimum = min(self.plateaus)

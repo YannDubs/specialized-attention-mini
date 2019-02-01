@@ -22,21 +22,17 @@ class Seq2seq(Module):
         encoder (EncoderRNN): object of EncoderRNN
         decoder (DecoderRNN): object of DecoderRNN
         mid_dropout_kwargs (dictionary, optonal): additional arguments to mid dropout.
-        mid_noise_sigma (float, optional) relative noise to add between the decoder
-            and encoder. This can be seen as a rough approximation to building a
-            variational latent representation as it forces the prediction of a
-            distribution rather than points.
 
     Inputs: input_variable, input_lengths, target_variable, teacher_forcing_ratio
-        - **input_variable** (list, option): list of sequences, whose length is the batch size and within which
-          each sequence is a list of token IDs. This information is forwarded to the encoder.
-        - **input_lengths** (list of int, optional): A list that contains the lengths of sequences
-            in the mini-batch, it must be provided when using variable length RNN (default: `None`)
-        - **target_variable** (list, optional): list of sequences, whose length is the batch size and within which
-          each sequence is a list of token IDs. This information is forwarded to the decoder.
-        - **teacher_forcing_ratio** (int, optional): The probability that teacher forcing will be used. A random number
-          is drawn uniformly from 0-1 for every decoding token, and if the sample is smaller than the given value,
-          teacher forcing would be used (default is 0)
+        input_variable (Tensor, optional): tensor of shape (batch_size,
+            max_bacth_len), of input token IDs. Examples that are shorter are
+            padded with <pad>.
+        input_lengths (list of int, optional): A list that contains the lengths
+            of sequences in the mini-batch.
+        target_variable (dictionary, optional): Dictionary containing possible
+            targets. Example: "decoder_output", "encoder_input", "attention_target"
+        teacher_forcing_ratio (float, optional): The probability that teacher
+          forcing will be used.
 
     Outputs: decoder_outputs, decoder_hidden, ret_dict
         - **decoder_outputs** (batch): batch-length list of tensors with size (max_length, hidden_size) containing the
@@ -51,7 +47,6 @@ class Seq2seq(Module):
     """
 
     def __init__(self, encoder, decoder,
-                 mid_noise_sigma=0,
                  mid_dropout_kwargs={}):
         super(Seq2seq, self).__init__()
 
@@ -60,8 +55,6 @@ class Seq2seq(Module):
 
         self.mid_dropout = AnnealedDropout(**mid_dropout_kwargs)
         self.is_update_mid_dropout = self.training
-        self.mid_noise = GaussianNoise(sigma=mid_noise_sigma)
-        self.is_update_mid_noise = self.training
 
     def forward(self, input_variable,
                 input_lengths=None,
@@ -76,13 +69,12 @@ class Seq2seq(Module):
         input_lengths_tensor = torch.FloatTensor(input_lengths).to(device)
         input_lengths = (input_lengths, input_lengths_tensor)
 
-        # Unpack target variables
-        try:
+        if target_variables is not None:
             target_output = target_variables.get('decoder_output', None)
-            # The attention target is preprended with an extra SOS step. We must remove this
+            # remove  preprended SOS step
             provided_attention = (target_variables['attention_target'][:, 1:]
                                   if 'attention_target' in target_variables else None)
-        except AttributeError:
+        else:
             target_output = None
             provided_attention = None
 
@@ -90,17 +82,11 @@ class Seq2seq(Module):
                                                                           input_lengths)
 
         self.is_update_mid_dropout = self.training
-        self.is_update_mid_noise = self.training
-
-        last_enc_control_out = self.mid_noise(last_enc_control_out)
-        last_enc_control_out = self._mid_dropout(last_enc_control_out)
 
         if isinstance(encoder_hidden, tuple):
             # for lstm
-            encoder_hidden = tuple(self.mid_noise(el) for el in encoder_hidden)
             encoder_hidden = tuple(self._mid_dropout(el) for el in encoder_hidden)
         else:
-            encoder_hidden = self.mid_noise(encoder_hidden)
             encoder_hidden = self._mid_dropout(encoder_hidden)
 
         (decoder_outputs,
@@ -108,7 +94,8 @@ class Seq2seq(Module):
          ret_dict) = self.decoder(encoder_hidden, keys, values, last_enc_control_out,
                                   inputs=target_output,
                                   teacher_forcing_ratio=teacher_forcing_ratio,
-                                  source_lengths=input_lengths)
+                                  source_lengths=input_lengths,
+                                  provided_attention=provided_attention)
 
         ret_dict["test"].update(self.get_to_test())
         ret_dict["visualize"].update(self.get_to_visualize())
