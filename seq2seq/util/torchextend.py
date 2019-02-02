@@ -6,7 +6,7 @@ To Do - medium:
 
 Contact: Yann Dubois
 """
-
+import ipdb
 import logging
 
 import torch
@@ -734,10 +734,13 @@ class Highway(Module):
             self.add_to_test(gates, self.save_name)
             self.add_to_visualize(gates.mean(-1).mean(-1), self.save_name)
 
-        if self.is_additive_highway:
-            x_new = x_new + (1 - gates) * x_old
-        else:
-            x_new = gates * x_new + (1 - gates) * x_old
+        try:
+            if self.is_additive_highway:
+                x_new = x_new + (1 - gates) * x_old
+            else:
+                x_new = gates * x_new + (1 - gates) * x_old
+        except:
+            ipdb.set_trace()
 
         if self.is_reg:
             loss = batch_reduction_f(gates, torch.mean)

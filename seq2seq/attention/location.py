@@ -334,6 +334,7 @@ class SigmaGenerator(Module):
                  gating="gated_res",
                  min_sigma=0.41,
                  initial_sigma=5.0,
+                 max_sigma=7.0,
                  **kwargs):
 
         super().__init__()
@@ -343,6 +344,7 @@ class SigmaGenerator(Module):
                              initial_gate=0.1, save_name="sigma_gate")
 
         self.min_sigma = min_sigma
+        self.max_sigma = max_sigma
         self.initial_sigma = initial_sigma
         self.hard_min_sigma = self.min_sigma / 1.5  # Max attn will be 0.9975
         self.get_sigma = HyperparameterInterpolator(self.initial_sigma,
@@ -394,6 +396,7 @@ class SigmaGenerator(Module):
             self.storer["raw_sigma_old"] = raw_sigma
             sigma = clamp(raw_sigma,
                           minimum=self.min_sigma,
+                          maximum=self.max_sigma,
                           is_leaky=True,
                           negative_slope=0.1,
                           hard_min=self.hard_min_sigma)
@@ -459,6 +462,7 @@ class MuGenerator(Module):
                  is_diagonal=True,  # DEV MODE
                  is_l0=True,  # DEV MODE
                  is_reg_mu_gates=False,  # DEV MODE
+                 rounder_weights_kwargs={},  # DEV MODE
                  **kwargs
                  ):
 
@@ -470,6 +474,7 @@ class MuGenerator(Module):
         self.gating = gating if not is_reg_mu_gates else "highway"
         self.is_l0 = is_l0
         self.is_reg_mu_gates = is_reg_mu_gates
+        self.clipping_step = clipping_step
 
         # Building blocks
         self.single_step = torch.tensor(1. / (self.max_len - 1)).to(device)
@@ -495,28 +500,24 @@ class MuGenerator(Module):
                              # is_round=self.is_reg_mu_gates. TO TEST
                              )
 
-        if clipping_step is None:
-            plateaus_step = "int"
-        else:
-            plateaus_step = list(range(-clipping_step, clipping_step + 1))
+        self.rounder_weights = get_rounder(**rounder_weights_kwargs)
 
-        self.acti_plat_step = PlateauAct(plateaus=plateaus_step)
+        if self.rounder_weights is None:
+            if clipping_step is None:
+                plateaus_step = "int"
+            else:
+                plateaus_step = list(range(-clipping_step, clipping_step + 1))
 
-        self.acti_plat_diag = PlateauAct(plateaus=[-1, 1],
-                                         len_plateaus=5e-1,
-                                         # n_steps_interpolate=n_steps_prepare_pos,
-                                         # len_factor_final=2.
-                                         )
-        self.acti_plat_bias = PlateauAct(plateaus=[-0.5, 0.5],
-                                         len_plateaus=3e-1,
-                                         # n_steps_interpolate=n_steps_prepare_pos,
-                                         # len_factor_final=2.
-                                         )
-        self.acti_plat = PlateauAct(plateaus=[0, 1],
-                                    len_plateaus=3e-1,
-                                    # n_steps_interpolate=n_steps_prepare_pos,
-                                    # len_factor_final=2.
-                                    )
+            plat_diag = [-1, 1] if self.is_l0 else [-1, 0, 1]
+            plat_bias = [-.5, .5] if self.is_l0 else [-.5, 0, .5]
+
+            self.acti_plat_step = PlateauAct(plateaus=plateaus_step)
+            self.acti_plat_diag = PlateauAct(plateaus=plat_diag,
+                                             len_plateaus=5e-1)
+            self.acti_plat_bias = PlateauAct(plateaus=plat_bias,
+                                             len_plateaus=3e-1)
+            self.acti_plat_bin = PlateauAct(plateaus=[0, 1],
+                                            len_plateaus=3e-1)
 
         self.loss_weights = torch.ones(self.n_building_blocks, device=device)
         self.loss_weights[self.bb_labels.index("single_step")] = 2.
@@ -613,30 +614,60 @@ class MuGenerator(Module):
         # gate
         mu_weights_old = (self.old_weights0.expand_as(mu_weights)
                           if step == 0 else self.storer["raw_mu_weights"])
-        try:
-            if self.is_reg_mu_gates:
-                mu_weights, loss = self.gate(mu_weights, mu_weights_old, weighter_out)
-                if self.is_regularize:
-                    self.add_regularization_loss("pos_mu_gates", loss)
-            else:
-                mu_weights = self.gate(mu_weights, mu_weights_old, weighter_out)
-        except:
-            ipdb.set_trace()
+        if self.is_reg_mu_gates:
+            mu_weights, loss = self.gate(mu_weights, mu_weights_old, weighter_out)
+            if self.is_regularize:
+                self.add_regularization_loss("pos_mu_gates", loss)
+        else:
+            mu_weights = self.gate(mu_weights, mu_weights_old, weighter_out)
 
         # plateau activation
         dict_mu_weights = dict(zip(self.bb_labels, mu_weights.unbind(-1)))
 
-        for l in self.bb_labels:
-            if l == "diagonal":
-                dict_mu_weights[l] = self.acti_plat_diag(dict_mu_weights[l])
-            elif l == "single_step":
-                dict_mu_weights[l] = self.acti_plat_step(dict_mu_weights[l])
-            elif l == "bias":
-                dict_mu_weights[l] = self.acti_plat_bias(dict_mu_weights[l])
-            elif l == "mean_attn_old":
-                dict_mu_weights[l] = self.acti_plat(dict_mu_weights[l])
-            else:
-                raise ValueError("Unkown label={}".format(l))
+        if self.rounder_weights is None:
+            for l in self.bb_labels:
+                if l == "diagonal":
+                    dict_mu_weights[l] = self.acti_plat_diag(dict_mu_weights[l])
+                elif l == "single_step":
+                    dict_mu_weights[l] = self.acti_plat_step(dict_mu_weights[l])
+                elif l == "bias":
+                    dict_mu_weights[l] = self.acti_plat_bias(dict_mu_weights[l])
+                elif l == "mean_attn_old":
+                    dict_mu_weights[l] = self.acti_plat_bin(dict_mu_weights[l])
+                else:
+                    raise ValueError("Unkown label={}".format(l))
+        else:
+            for i, l in enumerate(self.bb_labels):
+                is_update = (step == 0 and i == 0)
+                if l == "diagonal":
+                    dict_mu_weights[l] = torch.tanh(dict_mu_weights[l])
+                    if self.is_l0:
+                        dict_mu_weights[l] = self.rounder_weights((dict_mu_weights[l] + 1) / 2,
+                                                                  is_update=is_update) * 2 - 1
+                    else:
+                        dict_mu_weights[l] = self.rounder_weights((dict_mu_weights[l] + 1),
+                                                                  is_update=is_update) - 1
+
+                elif l == "single_step":
+                    if self.clipping_step is not None:
+                        # will be between -clipping_step and clipping_step
+                        dict_mu_weights[l] = torch.tanh(dict_mu_weights[l] / self.clipping_step
+                                                        ) * self.clipping_step
+                    dict_mu_weights[l] = self.rounder_weights(dict_mu_weights[l],
+                                                              is_update=is_update)
+                elif l == "bias":
+                    dict_mu_weights[l] = torch.tanh(dict_mu_weights[l])
+                    if self.is_l0:
+                        dict_mu_weights[l] = self.rounder_weights((dict_mu_weights[l] + 1) / 2,
+                                                                  is_update=is_update) - .5
+                    else:
+                        dict_mu_weights[l] = (self.rounder_weights(dict_mu_weights[l] + 1,
+                                                                   is_update=is_update) - 1) / 2
+                elif l == "mean_attn_old":
+                    dict_mu_weights[l] = torch.sigmoid(dict_mu_weights[l])
+                    dict_mu_weights[l] = self.rounder_weights(dict_mu_weights[l])
+                else:
+                    raise ValueError("Unkown label={}".format(l))
 
         ordered_weights = [dict_mu_weights[l] for l in self.bb_labels]
         mu_weights = torch.stack(ordered_weights, dim=2)
@@ -677,9 +708,6 @@ class MuGenerator(Module):
             mu = self.rounder_mu((mu + 0.5) * normalizer,
                                  is_update=is_update
                                  ) / normalizer - 0.5
-        else:  # DEV MODE
-            # plateau activation to words
-            mu = self.acti_plat_int((mu + 0.5) * normalizer) / normalizer - 0.5
 
         if self.is_regularize and self.is_reg_clamp_mu:
             eps = self.get_clamping_eps(is_update)
