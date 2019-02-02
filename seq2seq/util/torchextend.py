@@ -570,6 +570,8 @@ def get_rounder(name=None, **kwargs):
         return ConcreteRounder(**kwargs)
     elif name == "stochastic":
         return StochasticRounder(**kwargs)
+    elif name == "softConcrete":
+        return ConcreteRounder(**kwargs, is_hard=False)
     else:
         raise ValueError("Unkown rounder method {}".format(name))
 
