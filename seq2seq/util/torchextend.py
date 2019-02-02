@@ -492,6 +492,7 @@ class ConcreteRounder(Module):
                  final_temperature=None,
                  n_steps_interpolate=0,
                  mode="linear",
+                 is_hard=True,  # DEV MODE
                  **kwargs):
         super().__init__()
 
@@ -500,6 +501,7 @@ class ConcreteRounder(Module):
 
         self.start_step = start_step
         self.min_p = min_p
+        self.is_hard = is_hard
         self.get_temperature = HyperparameterInterpolator(initial_temperature,
                                                           final_temperature,
                                                           n_steps_interpolate,
@@ -534,12 +536,16 @@ class ConcreteRounder(Module):
         p = bound_probability(decimals, self.min_p)
         softBernouilli = torch.distributions.RelaxedBernoulli(temperature, p)
         soft_sample = softBernouilli.rsample()
-        new_d_detached = soft_sample.detach()
-        # removes a detached version of the soft X and adds the real X
-        # to emulate the fact that we add some non differentaible noise which just
-        # hapens to make the variable rounded. I.e the total is still differentiable
-        new_decimals = new_d_detached.round() - new_d_detached + soft_sample
-        x_rounded = x_floored + new_decimals - x_detached + x
+
+        if self.is_hard:
+            new_d_detached = soft_sample.detach()
+            # removes a detached version of the soft X and adds the real X
+            # to emulate the fact that we add some non differentaible noise which just
+            # hapens to make the variable rounded. I.e the total is still differentiable
+            new_decimals = new_d_detached.round() - new_d_detached + soft_sample
+            x_rounded = x_floored + new_decimals - x_detached + x
+        else:
+            x_rounded = x_floored + soft_sample - x_detached + x
 
         if idcs_to_round is not None:
             idcs_to_round = idcs_to_round.float()

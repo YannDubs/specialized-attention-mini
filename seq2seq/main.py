@@ -265,6 +265,9 @@ def get_seq2seq_model(src_len,
     n_steps_start_round = rate2steps(rate_start_round)
     rounders_kwars = {"concrete": {"n_steps_interpolate": rate2steps(anneal_temp_round),
                                    "start_step": n_steps_start_round},
+                      "softConcrete": {"n_steps_interpolate": rate2steps(anneal_temp_round),
+                                       "start_step": n_steps_start_round,
+                                       "is_hard": False},
                       "stochastic": {"start_step": n_steps_start_round},
                       None: {}}
 
