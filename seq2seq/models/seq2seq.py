@@ -6,11 +6,10 @@ NOTA BENE:
     - input_lengths should not use this tuple trick
 """
 import torch
+from torch import nn
 
 from seq2seq.util.helpers import get_extra_repr
 from seq2seq.util.base import Module
-from seq2seq import
-from seq2seq.util.torchextend import GaussianNoise, AnnealedDropout
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

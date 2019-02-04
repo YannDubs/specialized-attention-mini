@@ -281,8 +281,7 @@ def get_seq2seq_model(src_len,
                      clipping_step=clipping_step,
                      is_l0=is_l0,
                      is_reg_mu_gates=is_reg_mu_gates,
-                     rounder_weights_kwargs=rounder_weights_kwargs,
-                     sigma_kwargs=sigma_kwargs)
+                     rounder_weights_kwargs=rounder_weights_kwargs)
 
     location_kwargs = dict(n_steps_prepare_pos=n_steps_prepare_pos,
                            pdf=positioning_method,
@@ -291,7 +290,8 @@ def get_seq2seq_model(src_len,
                            pretrained_locator=pretrained_locator,
                            gating=gating,
                            is_recurrent=is_rnn_loc,
-                           hidden_size=location_size)
+                           hidden_size=location_size,
+                           sigma_kwargs=sigma_kwargs)
 
     content_kwargs = dict(scorer=content_method)
 
