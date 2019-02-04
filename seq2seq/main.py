@@ -89,7 +89,7 @@ def get_seq2seq_model(src_len,
                       is_mlps=False,
                       embedding_size=64,
                       hidden_size=128,
-                      anneal_mid_dropout=0.3,
+                      mid_dropout=0.5,
                       is_highway=True,
                       initial_gate=0.3,  # TO DO - medium: chose best and remove parameter
                       is_single_gate=True,
@@ -120,6 +120,7 @@ def get_seq2seq_model(src_len,
                       is_force_highway=False,  # DEV MODE
                       location_size=64,  # DEV MODE
                       rounder_weights=None,  # DEV MODE
+                      is_force_sigma=False,  # DEV MODE
                       ):
     """Return a initialized extrapolator model.
 
@@ -133,12 +134,8 @@ def get_seq2seq_model(src_len,
         embedding_size (int, optional): size of embedding for the decoder and
             encoder.
         hidden_size (int, optional): hidden size for unidirectional encoder.
-        anneal_mid_dropout (float, optional): annealed dropout between
-            the decoder and encoder. `mid_dropout` will actually start at
-            `initial_mid_dropout` and will geometrically decrease at each
-            training calls, until it reaches `final_mid_dropout`. This
-            parameter defines the percentage of training calls before the mdoel
-            should reach `final_mid_dropout`.
+        mid_dropout (float, optional): dropout between
+            the decoder and encoder.
         is_highway (bool, optional): whether to use a highway betwen the embedding
             and the value of the encoder. This can be
             useful to make the network learn the attention even before the
@@ -270,6 +267,8 @@ def get_seq2seq_model(src_len,
                       "stochastic": {"start_step": n_steps_start_round},
                       None: {}}
 
+    sigma_kwargs = dict(is_force_sigma=is_force_sigma)
+
     rounder_mu_kwargs = dict(name=rounder_mu)
     rounder_mu_kwargs.update(rounders_kwars[rounder_mu])
 
@@ -282,7 +281,8 @@ def get_seq2seq_model(src_len,
                      clipping_step=clipping_step,
                      is_l0=is_l0,
                      is_reg_mu_gates=is_reg_mu_gates,
-                     rounder_weights_kwargs=rounder_weights_kwargs)
+                     rounder_weights_kwargs=rounder_weights_kwargs,
+                     sigma_kwargs=sigma_kwargs)
 
     location_kwargs = dict(n_steps_prepare_pos=n_steps_prepare_pos,
                            pdf=positioning_method,
@@ -318,10 +318,7 @@ def get_seq2seq_model(src_len,
                          value_size=encoder.value_size,
                          **get_attender(attender, attender_kwargs))
 
-    mid_dropout_kwargs = dict(n_steps_interpolate=rate2steps(anneal_mid_dropout))
-
-    seq2seq = Seq2seq(encoder, decoder,
-                      mid_dropout_kwargs=mid_dropout_kwargs)
+    seq2seq = Seq2seq(encoder, decoder, mid_dropout=mid_dropout)
 
     seq2seq.set_dev_mode(value=is_dev_mode)
     seq2seq.set_viz_train(value=is_viz_train)

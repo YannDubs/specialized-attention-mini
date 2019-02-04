@@ -335,6 +335,7 @@ class SigmaGenerator(Module):
                  min_sigma=0.41,
                  initial_sigma=5.0,
                  max_sigma=7.0,
+                 is_force_sigma=False,  # DEV MODE
                  **kwargs):
 
         super().__init__()
@@ -343,6 +344,7 @@ class SigmaGenerator(Module):
         self.gate = get_gate(gating, hidden_size, 1,
                              initial_gate=0.1, save_name="sigma_gate")
 
+        self.is_force_sigma = is_force_sigma
         self.min_sigma = min_sigma
         self.max_sigma = max_sigma
         self.initial_sigma = initial_sigma
@@ -385,7 +387,7 @@ class SigmaGenerator(Module):
         # run it before updating
         is_still_annealing = self.get_sigma.is_annealing
         current_min_sigma = self.get_sigma(is_update_sigma)
-        if is_still_annealing:
+        if is_still_annealing or self.is_force_sigma:
             # if still annealing min sigma don't backprop to sigma generator
             sigma = current_min_sigma + torch.zeros_like(mu)
         else:

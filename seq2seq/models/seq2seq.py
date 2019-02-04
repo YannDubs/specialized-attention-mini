@@ -9,6 +9,7 @@ import torch
 
 from seq2seq.util.helpers import get_extra_repr
 from seq2seq.util.base import Module
+from seq2seq import
 from seq2seq.util.torchextend import GaussianNoise, AnnealedDropout
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -21,7 +22,7 @@ class Seq2seq(Module):
     Args:
         encoder (EncoderRNN): object of EncoderRNN
         decoder (DecoderRNN): object of DecoderRNN
-        mid_dropout_kwargs (dictionary, optonal): additional arguments to mid dropout.
+        mid_dropout (dictionary, optonal): mid dropout ratio.
 
     Inputs: input_variable, input_lengths, target_variable, teacher_forcing_ratio
         input_variable (Tensor, optional): tensor of shape (batch_size,
@@ -46,15 +47,13 @@ class Seq2seq(Module):
 
     """
 
-    def __init__(self, encoder, decoder,
-                 mid_dropout_kwargs={}):
+    def __init__(self, encoder, decoder, mid_dropout=0.5):
         super(Seq2seq, self).__init__()
 
         self.encoder = encoder
         self.decoder = decoder
 
-        self.mid_dropout = AnnealedDropout(**mid_dropout_kwargs)
-        self.is_update_mid_dropout = self.training
+        self.mid_dropout = nn.Dropout(p=mid_dropout)
 
     def forward(self, input_variable,
                 input_lengths=None,
@@ -81,13 +80,11 @@ class Seq2seq(Module):
         keys, values, encoder_hidden, last_enc_control_out = self.encoder(input_variable,
                                                                           input_lengths)
 
-        self.is_update_mid_dropout = self.training
-
         if isinstance(encoder_hidden, tuple):
             # for lstm
-            encoder_hidden = tuple(self._mid_dropout(el) for el in encoder_hidden)
+            encoder_hidden = tuple(self.mid_dropout(el) for el in encoder_hidden)
         else:
-            encoder_hidden = self._mid_dropout(encoder_hidden)
+            encoder_hidden = self.mid_dropout(encoder_hidden)
 
         (decoder_outputs,
          decoder_hidden,
@@ -102,11 +99,6 @@ class Seq2seq(Module):
         ret_dict["losses"].update(self.get_regularization_losses())
 
         return decoder_outputs, decoder_hidden, ret_dict
-
-    def _mid_dropout(self, x):
-        x = self.mid_dropout(x, is_update=self.is_update_mid_dropout)
-        self.is_update_mid_dropout = False  # makes sure that updates only once every forward
-        return x
 
     def extra_repr(self):
         pass
