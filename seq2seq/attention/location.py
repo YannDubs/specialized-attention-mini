@@ -390,6 +390,8 @@ class SigmaGenerator(Module):
         if is_still_annealing or self.is_force_sigma:
             # if still annealing min sigma don't backprop to sigma generator
             sigma = current_min_sigma + torch.zeros_like(mu)
+            if not is_still_annealing:
+                sigma = sigma / 2
         else:
             raw_sigma_old = (self.sigma0.expand_as(mu) if step == 0
                              else self.storer["raw_sigma_old"])
