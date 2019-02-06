@@ -370,8 +370,8 @@ class HyperparameterInterpolator:
     @property
     def is_annealing(self):
         return (self.is_interpolate) and (
-            self.start_step < self.n_training_calls) and (
-            self.n_training_calls < (self.n_steps_interpolate + self.start_step))
+            self.start_step <= self.n_training_calls) and (
+            self.n_training_calls <= (self.n_steps_interpolate + self.start_step))
 
     def __call__(self, is_update):
         """Return the current value of the hyperparameter.
