@@ -58,10 +58,15 @@ class EncoderRNN(BaseRNN):
         self.embedding_size = embedding_size
 
         self.embedding = nn.Embedding(vocab_size, embedding_size)
-        self.controller, self.hidden0 = get_rnn(self.rnn_cell, self.embedding_size,
-                                                self.hidden_size,
-                                                batch_first=True,
-                                                is_get_hidden0=True)
+        self.controller, hidden0 = get_rnn(self.rnn_cell, self.embedding_size,
+                                           self.hidden_size,
+                                           batch_first=True,
+                                           is_get_hidden0=True)
+        if isinstance(hidden0, tuple):
+            self.hidden0 = hidden0[0]
+            self.cell0 = hidden0[1]
+        else:
+            self.cell0 = None
 
         self.value_generator = ValueGenerator(self.hidden_size,
                                               embedding_size,
@@ -90,7 +95,8 @@ class EncoderRNN(BaseRNN):
 
         batch_size = input_var.size(0)
 
-        hidden = replicate_hidden0(self.hidden0, batch_size)
+        hidden0 = self.hidden0 if self.cell0 is None else (self.hidden0, self.cell0)
+        hidden = replicate_hidden0(hidden0, batch_size)
 
         embedded = self.embedding(input_var)
         embedded = self.input_dropout(embedded)

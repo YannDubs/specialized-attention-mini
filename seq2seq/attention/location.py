@@ -688,7 +688,7 @@ class MuGenerator(Module):
                             magnitude = torch.sigmoid(dict_mu_weights[l] /
                                                       (self.clipping_step - 1)
                                                       ) * (self.clipping_step - 1) + 1
-                            sign = torch.tanh(dict_mu_weights[step_sign])
+                            sign = torch.tanh(dict_mu_weights["step_sign"])
                             dict_mu_weights[l] = (self.rounder_weights(magnitude) *
                                                   self.rounder_weights(sign))
 
