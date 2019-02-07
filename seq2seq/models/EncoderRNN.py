@@ -66,6 +66,7 @@ class EncoderRNN(BaseRNN):
             self.hidden0 = hidden0[0]
             self.cell0 = hidden0[1]
         else:
+            self.hidden0 = hidden0
             self.cell0 = None
 
         self.value_generator = ValueGenerator(self.hidden_size,
