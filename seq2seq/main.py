@@ -86,6 +86,7 @@ def get_seq2seq_model(src_len,
                       tgt_sos_id,
                       tgt_eos_id,
                       total_training_calls,
+                      rnn_cell="lstm",
                       is_mlps=False,
                       embedding_size=64,
                       hidden_size=128,
@@ -256,7 +257,8 @@ def get_seq2seq_model(src_len,
                          max_len,
                          hidden_size,
                          embedding_size,
-                         value_kwargs=value_kwargs)
+                         value_kwargs=value_kwargs,
+                         rnn_cell=rnn_cell)
 
     # Decoder
     n_steps_start_round = rate2steps(rate_start_round)
@@ -316,7 +318,8 @@ def get_seq2seq_model(src_len,
                          tgt_sos_id,
                          tgt_eos_id,
                          value_size=encoder.value_size,
-                         **get_attender(attender, attender_kwargs))
+                         **get_attender(attender, attender_kwargs),
+                         rnn_cell=rnn_cell)
 
     seq2seq = Seq2seq(encoder, decoder, mid_dropout=mid_dropout)
 

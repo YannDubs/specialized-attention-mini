@@ -71,7 +71,7 @@ class DecoderRNN(BaseRNN):
                                         device=device)
 
         self.embedding = nn.Embedding(self.output_size, self.embedding_size)
-        self.controller = get_rnn("gru",
+        self.controller = get_rnn(self.rnn_cell,
                                   input_rnn_size,
                                   self.hidden_size,
                                   batch_first=True,
