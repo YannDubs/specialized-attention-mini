@@ -385,9 +385,9 @@ class SigmaGenerator(Module):
         is_update_sigma = self.training and step == 0
 
         # run it before updating
-        is_still_annealing = self.get_sigma.is_annealing
         current_min_sigma = self.get_sigma(is_update_sigma)
-        if is_still_annealing or self.is_force_sigma:
+        is_still_annealing = self.get_sigma.is_annealing
+        if self.get_sigma.is_annealing or self.is_force_sigma:
             # if still annealing min sigma don't backprop to sigma generator
             sigma = current_min_sigma + torch.zeros_like(mu)
             if not is_still_annealing:

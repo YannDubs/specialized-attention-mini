@@ -147,8 +147,10 @@ class SupervisedTrainer(object):
 
             #####################################################
             loss.scale_loss(self.loss_weights[i])
-
-            loss.backward(retain_graph=True)
+            try:
+                loss.backward(retain_graph=True)
+            except:
+                pass
 
         self.optimizer.step()
         model.zero_grad()
@@ -347,7 +349,7 @@ class SupervisedTrainer(object):
             else:
                 self.optimizer.update(loss_total_train, epoch)
 
-            #if epoch % 3 == 0:
+            # if epoch % 3 == 0:
             self.logger.info(log_msg)
 
         return others
