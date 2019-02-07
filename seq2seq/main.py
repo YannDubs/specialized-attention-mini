@@ -117,7 +117,7 @@ def get_seq2seq_model(src_len,
                       clipping_step=3,  # DEV MODE
                       is_rnn_loc=True,  # DEV MODE
                       is_l0=False,  # DEV MODE
-                      is_reg_mu_gates=True,  # DEV MODE
+                      is_reg_mu_gates=False,  # DEV MODE
                       is_force_highway=False,  # DEV MODE
                       location_size=64,  # DEV MODE
                       rounder_weights=None,  # DEV MODE
@@ -268,7 +268,8 @@ def get_seq2seq_model(src_len,
                       "softConcrete": {"n_steps_interpolate": rate2steps(anneal_temp_round),
                                        "start_step": n_steps_start_round},
                       "stochastic": {"start_step": n_steps_start_round},
-                      None: {}}
+                      None: {},
+                      "plateau": {}}
 
     sigma_kwargs = dict(is_force_sigma=is_force_sigma)
 

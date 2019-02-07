@@ -572,6 +572,8 @@ def get_rounder(name=None, **kwargs):
         return StochasticRounder(**kwargs)
     elif name == "softConcrete":
         return ConcreteRounder(**kwargs, is_hard=False)
+    elif name == "plateau":
+        return PlateauAct([0, 1], **kwargs)
     else:
         raise ValueError("Unkown rounder method {}".format(name))
 
@@ -791,6 +793,10 @@ def get_gate(gating, *args, **kwargs):
         return Highway(*args, is_additive_highway=False, **kwargs)
     elif gating == "r-highway":
         return Highway(*args, is_additive_highway=False, rounder="stochastic", **kwargs)
+    elif gating == "p-highway":
+        return Highway(*args, is_additive_highway=False, rounder="plateau", **kwargs)
+    elif gating == "c-highway":
+        return Highway(*args, is_additive_highway=False, rounder="softConcrete", **kwargs)
     elif gating == "gated_res":
         return Highway(*args, is_additive_highway=True, **kwargs)
     else:

@@ -18,7 +18,7 @@ from seq2seq.util.helpers import (renormalize_input_length, get_rnn, get_extra_r
                                   clamp, format_source_lengths, leaky_noisy_clamp,
                                   clamp_regularize, HyperparameterInterpolator,
                                   HyperparameterCurriculumInterpolator, get_indices,
-                                  regularization_loss, batch_reduction_f)
+                                  regularization_loss, batch_reduction_f, inv_sigmoid)
 from seq2seq.util.torchextend import get_rounder, L0Gates, get_gate, PlateauAct
 from seq2seq.util.initialization import replicate_hidden0, init_param
 from seq2seq.util.base import Module
@@ -513,31 +513,41 @@ class MuGenerator(Module):
         self.rounder_weights = get_rounder(**rounder_weights_kwargs)
 
         if self.rounder_weights is None:
-            if clipping_step is None:
+            if self.clipping_step is None:
                 plateaus_step = "int"
             else:
                 if self.is_sep_all:
-                    plateaus_step = list(range(1, clipping_step + 1))
+                    plateaus_step = list(range(1, self.clipping_step + 1))
                 else:
-                    plateaus_step = list(range(-clipping_step, clipping_step + 1))
+                    plateaus_step = list(range(-self.clipping_step, self.clipping_step + 1))
 
             plat_diag = [-1, 1] if self.is_l0 or self.is_sep_all else[-1, 0, 1]
             plat_bias = [-.5, .5] if self.is_l0 or self.is_sep_all else[-.5, 0, .5]
 
-            self.acti_plat_step = PlateauAct(plateaus=plateaus_step)
+            if not (self.clipping_step == 1 and self.is_sep_all):
+                self.acti_plat_step = PlateauAct(plateaus=plateaus_step)
             self.acti_plat_diag = PlateauAct(plateaus=plat_diag,
                                              len_plateaus=5e-1)
             self.acti_plat_bias = PlateauAct(plateaus=plat_bias,
                                              len_plateaus=3e-1)
             self.acti_plat_bin = PlateauAct(plateaus=[0, 1.],
                                             len_plateaus=3e-1)
+        else:
+            # will call sigmoid on all => make the weight factor in logit space
+            self.weight_factor = inv_sigmoid(self.weight_factor)
 
         if self.is_l0 or self.is_sep_all:
+            if self.gating == "r-highway":
+                rounder = "stochastic"
+            elif self.gating == "p-highway":
+                rounder = "plateau"
+            else:
+                rounder = None
             self.linear_l0_weights = L0Gates(hidden_size, self.n_building_blocks,
                                              is_at_least_1=True,
                                              initial_gates=1.,
                                              gating=self.gating,
-                                             rounder="stochastic" if self.gating == "r-highway" else None)
+                                             rounder=rounder)
 
             self.loss_weights = torch.ones(self.n_building_blocks, device=device)
             self.loss_weights[self.weight_labels.index("single_step")] = 2.
@@ -644,7 +654,10 @@ class MuGenerator(Module):
                     dict_mu_weights[l] = self.acti_plat_diag(dict_mu_weights[l])
                 elif l == "single_step":
                     sign = self.acti_plat_diag(dict_mu_weights["step_sign"])
-                    magnitude = self.acti_plat_step(dict_mu_weights[l])
+                    if self.clipping_step != 1:
+                        magnitude = self.acti_plat_step(dict_mu_weights[l])
+                    else:
+                        magnitude = 1
                     dict_mu_weights[l] = magnitude * sign
                 elif l == "bias":
                     dict_mu_weights[l] = self.acti_plat_bias(dict_mu_weights[l])
@@ -670,32 +683,40 @@ class MuGenerator(Module):
                 else:
                     raise ValueError("Unkown label={}".format(l))
         else:
+            # use sigmoid for all because used inverse sigmoid for weight init
             for i, l in enumerate(self.bb_labels):
                 is_update = (step == 0 and i == 0)
                 if l == "diagonal":
-                    dict_mu_weights[l] = torch.tanh(dict_mu_weights[l])
+                    dict_mu_weights[l] = torch.sigmoid(dict_mu_weights[l])
                     if self.is_l0 or self.is_sep_all:
-                        dict_mu_weights[l] = self.rounder_weights((dict_mu_weights[l] + 1) / 2,
+                        dict_mu_weights[l] = self.rounder_weights(dict_mu_weights[l],
                                                                   is_update=is_update) * 2 - 1
                     else:
-                        dict_mu_weights[l] = self.rounder_weights((dict_mu_weights[l]),
+                        # also plateau at 0
+                        dict_mu_weights[l] = self.rounder_weights(dict_mu_weights[l] * 2 - 1,
                                                                   is_update=is_update)
 
                 elif l == "single_step":
                     if self.clipping_step is not None:
                         if self.is_sep_all:
-                            # will be between 1 and clipping_step
-                            magnitude = torch.sigmoid(dict_mu_weights[l] /
-                                                      (self.clipping_step - 1)
-                                                      ) * (self.clipping_step - 1) + 1
-                            sign = torch.tanh(dict_mu_weights["step_sign"])
-                            dict_mu_weights[l] = (self.rounder_weights(magnitude) *
-                                                  self.rounder_weights(sign))
+                            if self.clipping_step != 1:
+                                # will be between 1 and clipping_step
+                                magnitude = torch.sigmoid(dict_mu_weights[l] /
+                                                          (self.clipping_step - 1)
+                                                          ) * (self.clipping_step - 1) + 1
+                                magnitude = self.rounder_weights(magnitude)
+                            else:
+                                magnitude = 1
+                            sign = torch.sigmoid(dict_mu_weights["step_sign"])
+                            sign = self.rounder_weights(sign) * 2 - 1
+
+                            dict_mu_weights[l] = magnitude * sign
 
                         else:
                             # will be between -clipping_step and clipping_step
-                            dict_mu_weights[l] = torch.tanh(dict_mu_weights[l] / self.clipping_step
-                                                            ) * self.clipping_step
+                            normalized = torch.sigmoid(dict_mu_weights[l] /
+                                                       self.clipping_step)
+                            dict_mu_weights[l] = (normalized * 2 - 1) * self.clipping_step
                             dict_mu_weights[l] = self.rounder_weights(dict_mu_weights[l],
                                                                       is_update=is_update)
                 elif l == "bias":

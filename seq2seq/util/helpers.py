@@ -819,3 +819,8 @@ def bound_probability(x, min_p):
     range_p = 1 - min_p * 2
     new_p = x * range_p + min_p
     return new_p
+
+
+def inv_sigmoid(p):
+    """Return the inverse sigmoid."""
+    return torch.log(p/(1-p))
