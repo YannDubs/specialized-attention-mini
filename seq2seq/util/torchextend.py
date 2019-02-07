@@ -609,6 +609,7 @@ class L0Gates(Module):
                  Generator=nn.Linear,
                  initial_gates=0.,
                  gating="gated_res",
+                 rounder=None,  # DEV MODE
                  **kwargs):
         super().__init__()
 
@@ -625,6 +626,7 @@ class L0Gates(Module):
                                           device=device)
 
         self.gate_to_prob = ProbabilityConverter()
+        self.rounder = get_rounder(rounder)
 
         if self.gating is not None:
             self.old_gater = get_gate(self.gating, input_size, self.output_size,
@@ -656,6 +658,8 @@ class L0Gates(Module):
             self.storer["raw_gates_old"] = gates
 
         gates = self.gate_to_prob(gates)
+        if self.rounder is not None:
+            gates = self.rounder(gates)
 
         to_reg = gates if loss_weights is None else gates * loss_weights
         loss = batch_reduction_f(to_reg, torch.mean)
@@ -700,6 +704,7 @@ class Highway(Module):
                  Generator=nn.Linear,
                  save_name=None,
                  is_reg=False,  # DEV MODE : regularizes how much of the new goes through
+                 rounder=None,  # DEV MODE
                  **kwargs):
         super().__init__()
 
@@ -715,6 +720,7 @@ class Highway(Module):
 
         self.gate_to_prob = ProbabilityConverter(initial_probability=self.initial_gate,
                                                  **kwargs)
+        self.rounder = get_rounder(rounder)
 
         self.reset_parameters()
 
@@ -737,6 +743,8 @@ class Highway(Module):
         """
         gates = self.gate_generator(controller)
         gates = self.gate_to_prob(gates)
+        if self.rounder is not None:
+            gates = self.rounder(gates)
 
         if self.save_name is not None:
             self.add_to_test(gates, self.save_name)
@@ -781,6 +789,8 @@ def get_gate(gating, *args, **kwargs):
         return res_gate
     elif gating == "highway":
         return Highway(*args, is_additive_highway=False, **kwargs)
+    elif gating == "r-highway":
+        return Highway(*args, is_additive_highway=False, rounder="stochastic", **kwargs)
     elif gating == "gated_res":
         return Highway(*args, is_additive_highway=True, **kwargs)
     else:

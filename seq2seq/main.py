@@ -122,6 +122,7 @@ def get_seq2seq_model(src_len,
                       location_size=64,  # DEV MODE
                       rounder_weights=None,  # DEV MODE
                       is_force_sigma=False,  # DEV MODE
+                      is_sep_all=False,  # DEV MODE
                       ):
     """Return a initialized extrapolator model.
 
@@ -283,7 +284,8 @@ def get_seq2seq_model(src_len,
                      clipping_step=clipping_step,
                      is_l0=is_l0,
                      is_reg_mu_gates=is_reg_mu_gates,
-                     rounder_weights_kwargs=rounder_weights_kwargs)
+                     rounder_weights_kwargs=rounder_weights_kwargs,
+                     is_sep_all=is_sep_all)
 
     location_kwargs = dict(n_steps_prepare_pos=n_steps_prepare_pos,
                            pdf=positioning_method,
