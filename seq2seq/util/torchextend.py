@@ -621,7 +621,6 @@ class L0Gates(Module):
         self.gating = gating
         self.gate_generator = Generator(self.input_size, self.output_size,
                                         **kwargs)
-
         if not isinstance(initial_gates, list):
             initial_gates = [initial_gates / output_size] * output_size
         self.initial_gates = torch.tensor(initial_gates, dtype=torch.float,
