@@ -718,7 +718,7 @@ class MuGenerator(Module):
 
                         dict_mu_weights[l] = magnitude * sign
                     else:
-                        dict_mu_weights[l] = self.rounder_weights(magnitude)
+                        dict_mu_weights[l] = self.rounder_weights(dict_mu_weights[l])
 
                 elif l == "bias":
                     dict_mu_weights[l] = torch.sigmoid(dict_mu_weights[l])
