@@ -31,6 +31,8 @@ def _get_loss(loss_name, token_loss_weight, tgt, **kwargs):
         loss = AttentionLoss(ignore_index=seq2seq.IGNORE_INDEX, **kwargs)
     elif loss_name == "attention mse loss":
         loss = AttentionMSELoss(ignore_index=seq2seq.IGNORE_INDEX, **kwargs)
+    elif loss_name == "bb attention loss":
+        loss = BBWeightLoss(ignore_index=seq2seq.IGNORE_INDEX, **kwargs)
     else:
         raise ValueError("Unkown loss : {}".format(loss_name))
 
@@ -141,6 +143,7 @@ class Loss(object):
         self.inputs = inputs
         self.target = target
         self.criterion = criterion
+        self.tgt_step_size = 1
         if not issubclass(type(self.criterion), nn.modules.loss._Loss):
             raise ValueError(
                 "Criterion has to be a subclass of torch.nn._Loss")
@@ -203,10 +206,18 @@ class Loss(object):
                                  for length in input_lengths],
                                 batch_first=True)
 
-        #ipdb.set_trace()
-        for step, step_output in enumerate(outputs):
-            step_target = targets[:, step + 1]
-            self.eval_step(step_output, step_target, position)
+        # ipdb.set_trace()
+        if self.tgt_step_size > 1:
+            for step, step_output in enumerate(outputs):
+                step_target = targets[:, step * 3: step * 3 + self.tgt_step_size]
+                try:
+                    self.eval_step(step_output, step_target, position)
+                except:
+                    ipdb.set_trace()
+        else:
+            for step, step_output in enumerate(outputs):
+                step_target = targets[:, step + 1]
+                self.eval_step(step_output, step_target, position)
 
         if len(outputs) > 0:
             self._post_eval_batch()
@@ -511,3 +522,49 @@ class AttentionMSELoss(Loss):
         self.norm_term += 1
         self.len_norm_term = 0
         self.tmp_acc_loss = 0
+
+
+class BBWeightLoss(Loss):
+    """ Cross entropy loss over attentions
+    Args:
+        ignore_index (int, optional): index of token to be masked
+        size_average (bool, optional): refer to http://pytorch.org/docs/master/nn.html#nllloss
+    """
+    _NAME = "BB Weight Loss"
+    _SHORTNAME = "bb_weight_loss"
+    _INPUTS = "attention_score"
+    _TARGETS = "attention_target"
+
+    def __init__(self,
+                 ignore_index=-1,
+                 total_training_calls=None,
+                 max_p_interpolators=None,
+                 max_len=50,
+                 **kwargs):
+        self.ignore_index = ignore_index
+
+        super().__init__(self._NAME,
+                         self._SHORTNAME,
+                         self._INPUTS,
+                         self._TARGETS,
+                         nn.MSELoss(reduction='sum', **kwargs),
+                         total_training_calls=total_training_calls,
+                         max_p_interpolators=max_p_interpolators,
+                         max_len=max_len)
+
+        self.tgt_step_size = 3
+
+    def get_loss(self):
+        # total loss for all batches
+        loss = self.acc_loss / self.norm_term
+        return loss.item()
+
+    def eval_step(self, step_outputs, step_target, position):
+        outputs = step_outputs.view(-1)
+        targets = step_target.contiguous().view(-1)
+        true_idx = targets.data.ne(7)
+
+        self.acc_loss = self.acc_loss + self.criterion(outputs[true_idx],
+                                                       targets[true_idx].float())
+
+        self.norm_term += true_idx.sum().float()

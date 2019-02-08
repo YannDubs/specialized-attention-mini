@@ -480,7 +480,8 @@ def train(train_path,
             tgt_len = len(vars(train[0])['tgt']) - 1  # -1 for SOS
             attn_len = len(vars(train[0])['attn']) - 1  # -1 for preprended ignore_index
             if attn_len != tgt_len:
-                raise Exception("Length of output sequence does not equal length of attention sequence in train data")
+                pass
+                #raise Exception("Length of output sequence does not equal length of attention sequence in train data")
 
         if dev is not None and len(dev) > 0:
             if 'attn' not in vars(dev[0]):
@@ -488,7 +489,8 @@ def train(train_path,
             tgt_len = len(vars(dev[0])['tgt']) - 1  # -1 for SOS
             attn_len = len(vars(dev[0])['attn']) - 1  # -1 for preprended ignore_index
             if attn_len != tgt_len:
-                raise Exception("Length of output sequence does not equal length of attention sequence in dev data.")
+                pass
+                #raise Exception("Length of output sequence does not equal length of attention sequence in dev data.")
 
     total_training_calls = math.ceil(epochs * len(train) / batch_size)
     rate2steps = Rate2Steps(total_training_calls)

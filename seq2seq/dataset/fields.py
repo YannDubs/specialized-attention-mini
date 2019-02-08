@@ -88,6 +88,7 @@ class AttentionField(torchtext.data.Field):
             ignore_index (int): The value that will be ignored for metric and loss calculation, when using attention loss
             **kwargs: The extra arguments for the parent class
         """
+        self.ignore_index = 7
         logger = logging.getLogger(__name__)
 
         if kwargs.get('batch_first') == False:
@@ -127,4 +128,4 @@ class AttentionField(torchtext.data.Field):
 
         super(AttentionField, self).__init__(**kwargs)
 
-        self.ignore_index = ignore_index
+        self.ignore_index = 7#ignore_index

@@ -171,7 +171,7 @@ class LocationOnlyAttender(Module):
             raise NotImplementedError(txt.format(n_queries))
         source_lengths_list, source_lengths_tensor = format_source_lengths(source_lengths)
 
-        mu, sigma = self._compute_parameters(query, step, source_lengths_tensor)
+        mu, sigma, mu_weights = self._compute_parameters(query, step, source_lengths_tensor)
 
         to_store = [x.squeeze(1) for x in [mu, sigma]]
         labels_to_store = ["mu", "sigma"]
@@ -185,7 +185,7 @@ class LocationOnlyAttender(Module):
         self.add_to_test([loc_attn], ["loc_attention"])
         self.storer["old_attn"] = loc_attn
 
-        return loc_attn
+        return loc_attn, mu_weights
 
     def _compute_parameters(self, weighter_inputs, step, source_lengths_tensor):
         """Compute the parameters of the positioning function.
@@ -210,11 +210,11 @@ class LocationOnlyAttender(Module):
         # for this the mean attn actually corresponds to mu which would be easier
         # to give, but as the focus in on the both attentions lets use the mean attn
         old_attn = self.storer["old_attn"] if step != 0 else None
-        mu = self.mu_generator(weighter_out, step, source_lengths_tensor, old_attn)
+        mu, mu_weights = self.mu_generator(weighter_out, step, source_lengths_tensor, old_attn)
 
         sigma = self.sigma_generator(weighter_out, mu, step)
 
-        return mu, sigma
+        return mu, sigma, mu_weights
 
     def _compute_attn(self, mu, sigma, source_lengths):
         """

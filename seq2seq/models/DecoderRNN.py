@@ -352,17 +352,17 @@ class DecoderRNN(BaseRNN):
                          step, provided_attention=None):
 
         query = controller_output
-        attn = self.attender(keys, query,
-                             source_lengths=source_lengths,
-                             step=step,
-                             controller=controller_output,
-                             provided_attention=provided_attention)
+        attn, mu_weights = self.attender(keys, query,
+                                         source_lengths=source_lengths,
+                                         step=step,
+                                         controller=controller_output,
+                                         provided_attention=provided_attention)
 
         context = torch.bmm(attn, values)
 
         self.add_to_visualize([step], ["step"])
 
-        return context, attn
+        return context, mu_weights
 
     def _initialize_additional(self, additional):
         if additional is None:

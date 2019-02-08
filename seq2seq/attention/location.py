@@ -632,7 +632,7 @@ class MuGenerator(Module):
         # set back to mu in [0,1]
         mu = mu + 0.5
 
-        return mu
+        return mu, mu_weights
 
     def _transform_weights(self, mu_weights, step, weighter_out):
         """Transforms the building block weights.
