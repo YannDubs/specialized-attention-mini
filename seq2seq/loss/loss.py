@@ -206,14 +206,10 @@ class Loss(object):
                                  for length in input_lengths],
                                 batch_first=True)
 
-        # ipdb.set_trace()
         if self.tgt_step_size > 1:
             for step, step_output in enumerate(outputs):
-                step_target = targets[:, step * 3: step * 3 + self.tgt_step_size]
-                try:
-                    self.eval_step(step_output, step_target, position)
-                except:
-                    ipdb.set_trace()
+                step_target = targets[:, step * 3 + 1: step * 3 + 1 + self.tgt_step_size]
+                self.eval_step(step_output, step_target, position)
         else:
             for step, step_output in enumerate(outputs):
                 step_target = targets[:, step + 1]
@@ -252,7 +248,6 @@ class Loss(object):
     def scale_loss(self, factor):
         """ Scale loss with a factor
         """
-        # ipdb.set_trace()
         self.acc_loss = self.acc_loss * factor
         if self.acc_loss.item() < 0:
             raise ValueError("The loss appears to be negative loss={}. factor={}".format(self.acc_loss.item()), factor)

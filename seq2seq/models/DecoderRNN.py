@@ -358,7 +358,11 @@ class DecoderRNN(BaseRNN):
                                          controller=controller_output,
                                          provided_attention=provided_attention)
 
-        context = torch.bmm(attn, values)
+        try:
+            context = torch.bmm(attn, values)
+        except:
+            import ipdb
+            ipdb.set_trace()
 
         self.add_to_visualize([step], ["step"])
 

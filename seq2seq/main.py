@@ -469,6 +469,7 @@ def train(train_path,
                                                   is_predict_eos=is_predict_eos,
                                                   oneshot_path=oneshot_path,
                                                   is_add_attn=is_attn_field)
+    import ipdb ipdb.set_trace()
     logger.debug("is_add_attn: {}".format(is_attn_field))
 
     # When chosen to use attentive guidance, check whether the data is correct for the first

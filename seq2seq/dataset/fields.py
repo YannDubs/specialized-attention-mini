@@ -1,6 +1,7 @@
 import logging
 
 import torchtext
+import torch
 
 
 class SourceField(torchtext.data.Field):
@@ -119,13 +120,13 @@ class AttentionField(torchtext.data.Field):
                 except (ValueError, TypeError):
                     return default
 
-            return [safe_cast(int, item, self.ignore_index) for item in example]
+            return [safe_cast(float, item, self.ignore_index) for item in example]
 
         post_process_pipeline = torchtext.data.Pipeline(convert_token=post_process_function)
 
         kwargs['preprocessing'] = preprocess
         kwargs['postprocessing'] = post_process_pipeline
 
-        super(AttentionField, self).__init__(**kwargs)
+        super(AttentionField, self).__init__(**kwargs, dtype=torch.float)
 
-        self.ignore_index = 7#ignore_index
+        self.ignore_index = 7  # ignore_index

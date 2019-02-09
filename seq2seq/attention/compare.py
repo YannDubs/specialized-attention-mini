@@ -289,7 +289,7 @@ class ContentOnlyAttender(Module):
 
         self.add_to_test([attn], ["content_attention"])
 
-        return attn
+        return attn, attn
 
 
 class HardAttender(Module):

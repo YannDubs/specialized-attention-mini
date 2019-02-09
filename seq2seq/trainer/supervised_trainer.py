@@ -147,10 +147,7 @@ class SupervisedTrainer(object):
 
             #####################################################
             loss.scale_loss(self.loss_weights[i])
-            try:
-                loss.backward(retain_graph=True)
-            except:
-                pass
+            loss.backward(retain_graph=True)
 
         self.optimizer.step()
         model.zero_grad()
@@ -441,6 +438,7 @@ class SupervisedTrainer(object):
 
     @staticmethod
     def get_losses(losses, metrics, step):
+
         total_loss = 0
         model_name = ''
         log_msg = ''
