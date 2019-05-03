@@ -1,9 +1,5 @@
 """
 Seq2seq class.
-
-NOTA BENE:
-    - I changed only a few things here.
-    - input_lengths should not use this tuple trick
 """
 import torch
 from torch import nn

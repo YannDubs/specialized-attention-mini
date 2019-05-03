@@ -1,11 +1,5 @@
 """
 Decoder class for a seq2seq.
-
-TO DO:
-    - Lot of refactoring here. I build step by step on the machine library, so
-    a lot of the work feels (and is) done in an ad-hoc way.
-
-Contact : Yann Dubois
 """
 import random
 
@@ -125,7 +119,8 @@ class DecoderRNN(BaseRNN):
         ret_dict[DecoderRNN.KEY_ATTN_SCORE] = list()
 
         inputs, batch_size, max_length = self._validate_args(inputs, encoder_hidden,
-                                                             teacher_forcing_ratio)
+                                                             teacher_forcing_ratio,
+                                                             provided_attention)
 
         additional, ret_dict = self._store_additional(additional, ret_dict)
         additional = self._initialize_additional(additional)
@@ -326,25 +321,30 @@ class DecoderRNN(BaseRNN):
 
         return predicted_softmax, hidden, attn, controller_output
 
-    def _validate_args(self, inputs, encoder_hidden, teacher_forcing_ratio):
+    def _validate_args(self, inputs, encoder_hidden, teacher_forcing_ratio, provided_attention):
         # inference batch size
         if inputs is not None:
             batch_size = inputs.size(0)
             max_length = inputs.size(1) - 1  # minus the start of sequence symbol
         else:
-            hidden = encoder_hidden
+            if provided_attention is None:
+                hidden = encoder_hidden
 
-            if self.rnn_cell == "lstm":
-                batch_size = hidden[0].size(1)
-            elif self.rnn_cell == "gru":
-                batch_size = hidden.size(1)
+                if self.rnn_cell == "lstm":
+                    batch_size = hidden[0].size(1)
+                elif self.rnn_cell == "gru":
+                    batch_size = hidden.size(1)
+
+                max_length = self.max_len
+            else:
+                batch_size = provided_attention.size(0)
+                max_length = provided_attention.size(1) - 1  # minus the start of sequence symbol
 
             if teacher_forcing_ratio > 0:
                 raise ValueError("Teacher forcing has to be disabled (set 0) when no inputs is provided.")
             inputs = torch.LongTensor([self.sos_id] * batch_size).view(batch_size, 1)
             if torch.cuda.is_available():
                 inputs = inputs.cuda()
-            max_length = self.max_len
 
         return inputs, batch_size, max_length
 

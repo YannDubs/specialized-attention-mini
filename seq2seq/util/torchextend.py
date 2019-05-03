@@ -771,6 +771,11 @@ def no_gate(new, old, controller):
     return new
 
 
+def force_gate(new, old, controller):
+    """Force gate helper function as lambda cannot be pickled."""
+    return old
+
+
 def res_gate(new, old, controller):
     """Res gate helper function as lambda cannot be pickled."""
     return new + old
@@ -786,6 +791,8 @@ def get_gate(gating, *args, **kwargs):
     """
     if gating is None:
         return no_gate
+    elif gating == "force":
+        return force_gate
     elif gating == "residual":
         return res_gate
     elif gating == "highway":

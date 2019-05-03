@@ -1,10 +1,5 @@
 """
 Encoder class for a seq2seq.
-
-NOTA BENE:
-     - Major difference is the value generator
-
-Contact: Yann Dubois
 """
 import math
 import logging
@@ -19,7 +14,7 @@ from .baseRNN import BaseRNN
 from seq2seq.util.initialization import replicate_hidden0, weights_init
 from seq2seq.util.helpers import (get_rnn, get_extra_repr, format_source_lengths)
 from seq2seq.util.base import Module
-from seq2seq.util.torchextend import ProbabilityConverter, Highway
+from seq2seq.util.torchextend import ProbabilityConverter, get_gate
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 logger = logging.getLogger(__name__)
@@ -130,49 +125,37 @@ class ValueGenerator(Module):
             which will be given as input to the generator.
         embedding_size (int): size of the embeddings.
         output_size (int, optional): output size of the generator.
-        is_highway (bool, optional): whether to use a highway between the
-            embedding an the output.
-        highway_kwargs (dictionary, optional): additional arguments to highway.
         Generator (Module, optional): module to generate various values. It
             should be callable using `Generator(input_size, output_size)(x)`.
             By default `nn.Linear`.
-        kwargs:
-            Additional arguments for the `BaseKeyValueQuery` parent class.
     """
 
     def __init__(self, input_size, embedding_size,
                  output_size=-1,
-                 is_highway=False,
-                 highway_kwargs={},
-                 Generator=nn.Linear,
-                 is_force_highway=False,  # DEV MODE
-                 **kwargs):
+                 gating="residual",  # DEV MODE
+                 Generator=nn.Linear):
 
         super(ValueGenerator, self).__init__()
 
         self.input_size = input_size
-        self.is_force_highway = is_force_highway
         self.output_size = _compute_size(output_size, self.input_size,
                                          name="output_size - {}".format(type(self).__name__))
+        self.gating = gating
 
-        if (is_highway or self.is_force_highway) and embedding_size != self.output_size:
+        if (gating is not None) and embedding_size != self.output_size:
             logger.warning("Using value_size == {} instead of {} because highway.".format(embedding_size, self.output_size))
             self.output_size = embedding_size
 
-        self.is_highway = is_highway
-
+        self.gate = get_gate(self.gating, self.input_size, self.output_size,
+                             save_name="value_gates")
         self.generator = Generator(self.input_size, self.output_size)
-
-        if self.is_highway:
-            self.highway = Highway(self.input_size, self.output_size,
-                                   save_name="value_gates", **highway_kwargs)
 
         self.reset_parameters()
 
     def extra_repr(self):
         return get_extra_repr(self,
                               always_shows=["input_size", "output_size"],
-                              conditional_shows=["is_highway"])
+                              conditional_shows=["gating"])
 
     def forward(self, input_generator, embedded):
         """Generate the value.
@@ -185,11 +168,5 @@ class ValueGenerator(Module):
         """
 
         values = self.generator(input_generator)
-
-        if self.is_force_highway:
-            values = embedded
-
-        elif self.is_highway:
-            values = self.highway(values, embedded, input_generator)
-
+        values = self.gate(values, embedded, input_generator)
         return values

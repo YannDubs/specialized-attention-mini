@@ -1,5 +1,7 @@
 import torch
 
+from seq2seq import IGNORE_INDEX
+
 
 class Predictor(object):
 
@@ -20,7 +22,7 @@ class Predictor(object):
         self.src_vocab = src_vocab
         self.tgt_vocab = tgt_vocab
 
-    def predict(self, src_seq):
+    def predict(self, src_seq, attention_target=None):
         """ Make prediction given `src_seq` as input.
 
         Args:
@@ -34,7 +36,15 @@ class Predictor(object):
         if torch.cuda.is_available():
             src_id_seq = src_id_seq.cuda()
 
-        softmax_list, _, other = self.model(src_id_seq, [len(src_seq)])
+        if attention_target is not None:
+            attention_target = torch.LongTensor([IGNORE_INDEX] + [int(i) for i in attention_target]).view(1, -1)
+            target_variables = dict(attention_target=attention_target)
+        else:
+            target_variables = None
+
+        softmax_list, _, other = self.model(src_id_seq,
+                                            input_lengths=[len(src_seq)],
+                                            target_variables=target_variables)
 
         length = other['length'][0]
 

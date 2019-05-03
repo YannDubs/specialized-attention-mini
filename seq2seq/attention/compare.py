@@ -143,7 +143,8 @@ class LocationOnlyAttender(Module):
         attender"""
         return self.named_parameters()
 
-    def forward(self, keys, query, source_lengths=None, step=None, **kwargs):
+    def forward(self, keys, query, source_lengths=None, step=None,
+                provided_attention=None, **kwargs):
         """Compute and return the location attention.
 
         Args:
@@ -159,6 +160,7 @@ class LocationOnlyAttender(Module):
             loc_attn (torch.tensor): location attention. Shape: (batch_size,
                 n_queries, n_keys).
         """
+
         assert source_lengths is not None
         assert step is not None
 
@@ -171,7 +173,8 @@ class LocationOnlyAttender(Module):
             raise NotImplementedError(txt.format(n_queries))
         source_lengths_list, source_lengths_tensor = format_source_lengths(source_lengths)
 
-        mu, sigma = self._compute_parameters(query, step, source_lengths_tensor)
+        mu, sigma = self._compute_parameters(query, step, source_lengths_tensor,
+                                             provided_attention)
 
         to_store = [x.squeeze(1) for x in [mu, sigma]]
         labels_to_store = ["mu", "sigma"]
@@ -187,7 +190,8 @@ class LocationOnlyAttender(Module):
 
         return loc_attn
 
-    def _compute_parameters(self, weighter_inputs, step, source_lengths_tensor):
+    def _compute_parameters(self, weighter_inputs, step, source_lengths_tensor,
+                            provided_attention):
         """Compute the parameters of the positioning function.
 
         Return:
@@ -196,6 +200,7 @@ class LocationOnlyAttender(Module):
             sigma (torch.FloatTensor): standard deviation of location. Shape:
                 (batch_size, n_queries, 1)
         """
+
         if self.is_recurrent:
             if step == 0:
                 batch_size = weighter_inputs.size(0)
@@ -210,7 +215,9 @@ class LocationOnlyAttender(Module):
         # for this the mean attn actually corresponds to mu which would be easier
         # to give, but as the focus in on the both attentions lets use the mean attn
         old_attn = self.storer["old_attn"] if step != 0 else None
-        mu = self.mu_generator(weighter_out, step, source_lengths_tensor, old_attn)
+
+        mu = self.mu_generator(weighter_out, step, source_lengths_tensor, old_attn,
+                               provided_attention)
 
         sigma = self.sigma_generator(weighter_out, mu, step)
 
@@ -258,7 +265,7 @@ class ContentOnlyAttender(Module):
             distance. `"euclidean"` Euclidean distance.
     """
 
-    def __init__(self, controller_size, max_len=None, scorer="multiplicative"):
+    def __init__(self, controller_size, max_len=None, scorer="scaledot"):
         super().__init__()
 
         self.scorer = get_scorer(scorer, controller_size, max_len=max_len)

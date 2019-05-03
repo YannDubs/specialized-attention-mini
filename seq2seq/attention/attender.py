@@ -1,9 +1,5 @@
 """
 General attender.
-
-TO DO:
-
-Contact: Yann Dubois
 """
 
 import torch
@@ -52,11 +48,6 @@ class Attender(Module):
         self.location_attender = LocationAttender(loc_query_size, max_len, **location_kwargs)
         self.attn_mixer = AttentionMixer(controller_size,
                                          **mixer_kwargs)
-
-        self.rel_counter = torch.arange(0, self.max_len,
-                                        dtype=torch.float,
-                                        device=device).unsqueeze(1) / (self.max_len - 1)
-
         self.reset_parameters()
 
     def extra_repr(self):

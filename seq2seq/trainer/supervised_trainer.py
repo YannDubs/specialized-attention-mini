@@ -1,11 +1,8 @@
-"""Trainer class.
-
-NOTA BENE:
-- I have nearly not touched this class.
+"""
+Trainer class.
 """
 
 from __future__ import division
-import ipdb  # DEV MODE
 
 import logging
 import os
@@ -52,8 +49,6 @@ class SupervisedTrainer(object):
         loss_weight_updater (seq2seq.loss.loss.LossWeightUpdater, optional): updater
             of the loss weight. Used to update the weight of the loss of due to
             one token.
-        teacher_forcing_kwargs (dictionary, optional): additional arguments to
-            the teacher forcing percentage interpolator.
         initial_model (string, optional): name of the file where will save the
             initial model. this is useful to understand how tohe model was initialized.
     """
@@ -70,9 +65,9 @@ class SupervisedTrainer(object):
                  print_every=100,
                  early_stopper=None,
                  loss_weight_updater=None,
-                 teacher_forcing_kwargs={},
                  initial_model=None,
-                 log_level=None):
+                 log_level=None,
+                 teacher_forcing=0.2):
         self._trainer = "Simple Trainer"
         self.random_seed = random_seed
         if random_seed is not None:
@@ -93,7 +88,7 @@ class SupervisedTrainer(object):
         self.checkpoint_every = checkpoint_every
         self.print_every = print_every
         self.loss_weight_updater = loss_weight_updater
-        self.teacher_forcing = HyperparameterInterpolator(**teacher_forcing_kwargs)
+        self.teacher_forcing = teacher_forcing
         self.initial_model = initial_model
 
         self.early_stopper = early_stopper
@@ -112,11 +107,10 @@ class SupervisedTrainer(object):
         loss = self.loss
 
         # Forward propagation
-        tf_ratio = self.teacher_forcing(True)
         decoder_outputs, decoder_hidden, other = model(input_variable,
                                                        input_lengths,
                                                        target_variable,
-                                                       teacher_forcing_ratio=tf_ratio)
+                                                       teacher_forcing_ratio=self.teacher_forcing)
 
         losses = self.evaluator.compute_batch_loss(decoder_outputs,
                                                    decoder_hidden,

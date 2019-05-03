@@ -1,14 +1,5 @@
 """
 Main package entrypoint.
-
-TO - DO:
-- There are way too many arguments that I have kept to test, you should not
-    keep all of them when refactoring for self-attention. Focus On the important
-    ones.
-- there are many different. Should not give all in different parameters but simply
-    a dictionary. And in constructor just initialize a list of each dropouts / noising
-    classes and in `forward` just call each
-- should modulrize more. Ex plit : gettseq2seq. Into get encoder / decoder / attn
 """
 
 import os
@@ -68,7 +59,7 @@ def _rename_latest_file(path, new_name):
     os.rename(latest_file, os.path.join(path, new_name))
 
 
-def is_add_attn(attender, loss_names):
+def get_is_attn_field(attender, loss_names, force_mu):
     """Whether to add the attention field."""
     is_hard_attn = attender == "hard"
     is_attn_loss = False
@@ -77,7 +68,7 @@ def is_add_attn(attender, loss_names):
             is_attn_loss = True
         elif "attention" in loss_name[0]:
             is_attn_loss = True
-    return is_hard_attn or is_attn_loss
+    return is_hard_attn or is_attn_loss or force_mu is not None
 
 
 def get_seq2seq_model(src_len,
@@ -91,10 +82,7 @@ def get_seq2seq_model(src_len,
                       embedding_size=64,
                       hidden_size=128,
                       mid_dropout=0.5,
-                      is_highway=True,
-                      initial_gate=0.3,  # TO DO - medium: chose best and remove parameter
-                      is_single_gate=True,
-                      is_additive_highway=False,   # TO DO - medium: chose best and remove parameter
+                      gating_encoder="residual",  # DEV MODE
                       content_method='scaledot',  # see if scaledmult better
                       value_size=-1,
                       value_noise_sigma=0,
@@ -118,11 +106,10 @@ def get_seq2seq_model(src_len,
                       is_rnn_loc=True,  # DEV MODE
                       is_l0=False,  # DEV MODE
                       is_reg_mu_gates=False,  # DEV MODE
-                      is_force_highway=False,  # DEV MODE
                       location_size=64,  # DEV MODE
                       rounder_weights=None,  # DEV MODE
                       is_force_sigma=False,  # DEV MODE
-                      is_sep_all=False,  # DEV MODE
+                      force_mu=None,  # DEV MODE
                       ):
     """Return a initialized extrapolator model.
 
@@ -138,21 +125,6 @@ def get_seq2seq_model(src_len,
         hidden_size (int, optional): hidden size for unidirectional encoder.
         mid_dropout (float, optional): dropout between
             the decoder and encoder.
-        is_highway (bool, optional): whether to use a highway betwen the embedding
-            and the value of the encoder. This can be
-            useful to make the network learn the attention even before the
-            decoder converged.
-        initial_gate (float, optional): initial highway gate (i.e how much of the
-            value to let through compared to the embedding: smaller lets more
-            embeddings)
-        is_single_carry (bool, optional): whetehr to use a one dimension carry weight
-            instead of n dimensional. If a n dimension then the network can learn
-            to carry some dimensions but not others. The downside is that
-            the number of parameters would be larger.
-        is_additive_highway (bool, optional): whether to use a residual connection
-            with a carry weight got th residue. I.e if `True` the carry weight will
-            only be applied to the residue and will not scale the new value with
-            `1-carry`.
         content_method ({'multiplicative', "additive", "euclidean", "scaledot",
             "cosine", "kq"}, optional):
             The method to compute the alignment. `"scaledot" [Vaswani et al., 2017]
@@ -234,6 +206,14 @@ def get_seq2seq_model(src_len,
         is_viz_train (bool, optional): whether to save how the averages of some
             intepretable variables change during training in "visualization"
             of `additional`.
+        force_mu ({None, "bb", "bb-zeroW", "all"}, optional): If `"bb"` add a
+            provided attention as building block, it still has to learn the
+            correct weights. If `"bb-zeroW"` it zeros out the weights of all othet
+            building blocks in addition to adding the provided attention as building
+            block, the network still has to learn to use a weight of 1 for this bb.
+            `"all"` sets both the correct building block and weights, the network
+            will have access to the correct mu but still has to learn sigma.  `
+            None` doesn't force mu.
     """
     assert max_len > 1, "Max len has to be greater than 1"
 
@@ -243,16 +223,9 @@ def get_seq2seq_model(src_len,
     Generator = MLP if is_mlps else nn.Linear
 
     # Encoder
-    highway_kwargs = dict(initial_gate=initial_gate,
-                          is_single_gate=is_single_gate,
-                          is_additive_highway=is_additive_highway,
-                          Generator=Generator)
-
     value_kwargs = dict(output_size=value_size,
-                        is_highway=is_highway,
-                        highway_kwargs=highway_kwargs,
                         Generator=Generator,
-                        is_force_highway=is_force_highway)
+                        gating=gating_encoder)
 
     encoder = EncoderRNN(src_len,
                          max_len,
@@ -263,30 +236,27 @@ def get_seq2seq_model(src_len,
 
     # Decoder
     n_steps_start_round = rate2steps(rate_start_round)
-    rounders_kwars = {"concrete": {"n_steps_interpolate": rate2steps(anneal_temp_round),
-                                   "start_step": n_steps_start_round},
-                      "softConcrete": {"n_steps_interpolate": rate2steps(anneal_temp_round),
-                                       "start_step": n_steps_start_round},
-                      "stochastic": {"start_step": n_steps_start_round},
-                      None: {},
-                      "plateau": {}}
+    rounders_kwargs = {"concrete": {"name": "concrete",
+                                    "n_steps_interpolate": rate2steps(anneal_temp_round),
+                                    "start_step": n_steps_start_round},
+                       "softConcrete": {"name": "softConcrete",
+                                        "n_steps_interpolate": rate2steps(anneal_temp_round),
+                                        "start_step": n_steps_start_round},
+                       "stochastic": {"name": "stochastic",
+                                      "start_step": n_steps_start_round},
+                       None: {"name": None},
+                       "plateau": {"name": "plateau"}}
 
     sigma_kwargs = dict(is_force_sigma=is_force_sigma)
 
-    rounder_mu_kwargs = dict(name=rounder_mu)
-    rounder_mu_kwargs.update(rounders_kwars[rounder_mu])
-
-    rounder_weights_kwargs = dict(name=rounder_weights)
-    rounder_weights_kwargs.update(rounders_kwars[rounder_weights])
-
-    mu_kwargs = dict(rounder_mu_kwargs=rounder_mu_kwargs,
+    mu_kwargs = dict(rounder_mu_kwargs=rounders_kwargs[rounder_mu],
                      is_reg_clamp_mu=is_reg_clamp_mu,
                      is_diagonal=is_diagonal,
                      clipping_step=clipping_step,
                      is_l0=is_l0,
                      is_reg_mu_gates=is_reg_mu_gates,
-                     rounder_weights_kwargs=rounder_weights_kwargs,
-                     is_sep_all=is_sep_all)
+                     rounder_weights_kwargs=rounders_kwargs[rounder_weights],
+                     force_mu=force_mu)
 
     location_kwargs = dict(n_steps_prepare_pos=n_steps_prepare_pos,
                            pdf=positioning_method,
@@ -300,14 +270,11 @@ def get_seq2seq_model(src_len,
 
     content_kwargs = dict(scorer=content_method)
 
-    rounder_perc_kwargs = dict(name=rounder_perc)
-    rounder_perc_kwargs.update(rounders_kwars[rounder_perc])
-
     n_steps_wait = rate2steps(rate_attmix_wait)
     mixer_kwargs = dict(Generator=Generator,
                         mode=mode_attn_mix,
                         n_steps_wait=n_steps_wait,
-                        rounder_perc_kwargs=rounder_perc_kwargs,
+                        rounder_perc_kwargs=rounders_kwargs[rounder_perc],
                         dflt_perc_loc=dflt_perc_loc)
 
     attender_kwargs = dict(content_kwargs=content_kwargs,
@@ -321,8 +288,8 @@ def get_seq2seq_model(src_len,
                          tgt_sos_id,
                          tgt_eos_id,
                          value_size=encoder.value_size,
-                         **get_attender(attender, attender_kwargs),
-                         rnn_cell=rnn_cell)
+                         rnn_cell=rnn_cell,
+                         **get_attender(attender, attender_kwargs))
 
     seq2seq = Seq2seq(encoder, decoder, mid_dropout=mid_dropout)
 
@@ -336,7 +303,6 @@ def get_seq2seq_model(src_len,
 
 def train(train_path,
           dev_path,
-          oneshot_path=None,
           metric_names=["word accuracy", "sequence accuracy",
                         "final target accuracy"],
           loss_names=["nll"],
@@ -346,8 +312,7 @@ def train(train_path,
           src_vocab=50000,
           tgt_vocab=50000,
           is_predict_eos=True,
-          anneal_teacher_forcing=0,
-          initial_teacher_forcing=0.2,
+          teacher_forcing=0.2,
           batch_size=32,
           eval_batch_size=256,
           lr=1e-3,
@@ -366,22 +331,19 @@ def train(train_path,
           anneal_eos_weight=0,  # TO DO : hyperparmeter optimize
           _initial_eos_weight=0.,
           content_method='scaledot',
-          is_amsgrad=True,  # TO DO - medium : chose best valeu and delete param
+          is_amsgrad=False,  # TO DO - medium : chose best valeu and delete param
           rate_prepare_pos=0.05,
           plateau_reduce_lr=[4, 0.5],
           _initial_model="initial_model",
           attender="attender",
           pretrained_locator=None,  # DEV MODE
+          force_mu=None,  # DEV MODE
           **kwargs):
     """Trains the model given all parameters.
 
     Args:
         train_path (str): path to the training data.
         dev_path (str): path to the validation data.
-        oneshot_path (str, optional): path to the data containing the new examples
-            that should be learned in a few shot learning. If given, the model
-            will be transfered on this data after having converged on the training
-            data.
         metric_names (list of str, optional): names of the metrics to use. See
             `seq2seq.metrics.metrics.get_metrics` for more details.
         loss_names (list of str, optional): names of the metrics to use. See
@@ -394,13 +356,7 @@ def train(train_path,
         tgt_vocab (int, optional): maximum target vocabulary size.
         is_predict_eos (bool, optional): whether the mdoel has to predict the <eos>
             token.
-        anneal_teacher_forcing (float, optional): annealed teacher forcing,
-            the teacher forcing will start at `initial_teacher_forcing` and will
-            linearly decrease at each training calls, until it reaches 0. This
-            parameter defines the percentage  of training calls before reaching
-            a teacher_forcing_ratio of 0.
-        initial_teacher_forcing (float, optional): initial teacher forcing ratio.
-            If `anneal_teacher_forcing==0` will be the constant teacher forcing ratio.
+        teacher_forcing (float, optional): teacher forcing ratio.
         batch_size (int, optional): size of each training batch.
         eval_batch_size (int, optional): size of each evaluation batch.
         lr (float, optional): learning rate.
@@ -460,35 +416,36 @@ def train(train_path,
         logging.info("Cuda device set to {}".format(cuda_device))
         torch.cuda.set_device(cuda_device)
 
-    is_attn_field = is_add_attn(attender, loss_names)
+    is_attn_field = get_is_attn_field(attender, loss_names, force_mu)
+
     train, dev, src, tgt, oneshot = get_train_dev(train_path,
                                                   dev_path,
                                                   max_len,
                                                   src_vocab,
                                                   tgt_vocab,
                                                   is_predict_eos=is_predict_eos,
-                                                  oneshot_path=oneshot_path,
                                                   is_add_attn=is_attn_field)
     logger.debug("is_add_attn: {}".format(is_attn_field))
 
     # When chosen to use attentive guidance, check whether the data is correct for the first
     # example in the data set. We can assume that the other examples are then also correct.
     if is_attn_field:
+        is_dot_eos = train[0].__dict__['src'][-1] == "."
         if len(train) > 0:
             if 'attn' not in vars(train[0]):
                 raise Exception("AttentionField not found in train data")
             tgt_len = len(vars(train[0])['tgt']) - 1  # -1 for SOS
             attn_len = len(vars(train[0])['attn']) - 1  # -1 for preprended ignore_index
-            if attn_len != tgt_len:
-                raise Exception("Length of output sequence does not equal length of attention sequence in train data")
+            if attn_len != tgt_len and not (attn_len == tgt_len + 1 and is_dot_eos):
+                raise Exception("Length of output sequence {} does not equal length of attention sequence in train data {}. First train example: {}".format(tgt_len, attn_len, train[0].__dict__))
 
         if dev is not None and len(dev) > 0:
             if 'attn' not in vars(dev[0]):
                 raise Exception("AttentionField not found in dev data")
             tgt_len = len(vars(dev[0])['tgt']) - 1  # -1 for SOS
             attn_len = len(vars(dev[0])['attn']) - 1  # -1 for preprended ignore_index
-            if attn_len != tgt_len:
-                raise Exception("Length of output sequence does not equal length of attention sequence in dev data.")
+            if attn_len != tgt_len and not (attn_len == tgt_len + 1 and is_dot_eos):
+                raise Exception("Length of output sequence {} does not equal length of attention sequence in train data {}. First train example: {}".format(tgt_len, attn_len, train[0].__dict__))
 
     total_training_calls = math.ceil(epochs * len(train) / batch_size)
     rate2steps = Rate2Steps(total_training_calls)
@@ -499,6 +456,7 @@ def train(train_path,
                                 content_method=content_method,
                                 n_steps_prepare_pos=n_steps_prepare_pos,
                                 attender=attender,
+                                force_mu=force_mu,
                                 **kwargs)
 
     n_parameters = sum([p.numel() for p in seq2seq.parameters()])
@@ -534,12 +492,6 @@ def train(train_path,
     else:
         loss_weight_updater = None
 
-    final_teacher_forcing = 0 if anneal_teacher_forcing != 0 else initial_teacher_forcing
-    teacher_forcing_kwargs = dict(initial_value=initial_teacher_forcing,
-                                  final_value=final_teacher_forcing,
-                                  n_steps_interpolate=rate2steps(anneal_teacher_forcing),
-                                  mode="linear")
-
     trainer = SupervisedTrainer(loss=losses,
                                 metrics=metrics,
                                 loss_weights=loss_weights,
@@ -550,7 +502,7 @@ def train(train_path,
                                 expt_dir=output_dir,
                                 early_stopper=early_stopper,
                                 loss_weight_updater=loss_weight_updater,
-                                teacher_forcing_kwargs=teacher_forcing_kwargs,
+                                teacher_forcing=teacher_forcing,
                                 initial_model=_initial_model,
                                 log_level=log_level)
 
@@ -605,7 +557,3 @@ def train(train_path,
     _save_parameters(saved_args, final_model)
 
     return seq2seq, history, other
-
-
-def _l05loss(pred, target):
-    return regularization_loss(pred - target, is_no_mean=True, p=0.5)
