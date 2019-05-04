@@ -66,7 +66,7 @@ class Seq2seq(Module):
         if target_variables is not None:
             target_output = target_variables.get('decoder_output', None)
             # remove  preprended SOS step
-            provided_attention = (target_variables['attention_target'][:, 1:]
+            provided_attention = (target_variables['attention_target'][:, 1:].to(device)
                                   if 'attention_target' in target_variables else None)
         else:
             target_output = None

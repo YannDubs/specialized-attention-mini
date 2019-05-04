@@ -53,8 +53,8 @@ class Attender(Module):
     def extra_repr(self):
         pass
 
-    def forward(self, keys, query,
-                source_lengths=None, step=None, controller=None, **kwargs):
+    def forward(self, keys, query, source_lengths=None, step=None,
+                controller=None, provided_attention=None, **kwargs):
         """Compute and return the final attention.
 
         Args:
@@ -82,7 +82,8 @@ class Attender(Module):
 
         old_attn = self.storer["old_attn"] if step != 0 else None
         loc_attn, conf_loc = self.location_attender(query, source_lengths, step,
-                                                    old_attn)
+                                                    old_attn,
+                                                    provided_attention=provided_attention)
 
         self.add_to_visualize([conf_content, conf_loc], ["content_confidence", "loc_confidence"])
         self.add_to_test([content_attn, loc_attn], ["content_attention", "loc_attention"])

@@ -92,9 +92,9 @@ def get_seq2seq_model(src_len,
                       anneal_temp_round=0.1,
                       rounder_mu="concrete",
                       mode_attn_mix="loc_conf",  # TO DO - medium: chose best and remove parameter
-                      rate_attmix_wait=0,
-                      dflt_perc_loc=0.5,  # TO DO - medium: chose best and remove parameter
-                      rounder_perc="concrete",  # TO DO - medium: chose best and remove parameter
+                      rate_attmix_wait=0.05,  # TO DO - medium: chose best and remove parameter
+                      dflt_perc_loc=0.7,  # TO DO - medium: chose best and remove parameter
+                      rounder_perc=None,  # TO DO - medium: chose best and remove parameter
                       is_dev_mode=False,
                       is_viz_train=False,
                       attender="attender",

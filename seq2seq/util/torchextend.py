@@ -564,16 +564,19 @@ def get_rounder(name=None, **kwargs):
         kwargs:
             Additional arguments to the *Rounding
     """
+    if isinstance(name, str):
+        name = name.lower()
+
     if name is None:
         return None
     elif name == "concrete":
         return ConcreteRounder(**kwargs)
     elif name == "stochastic":
         return StochasticRounder(**kwargs)
-    elif name == "softConcrete":
+    elif name == "softconcrete":
         return ConcreteRounder(**kwargs, is_hard=False)
     elif name == "plateau":
-        return PlateauAct([0, 1], **kwargs)
+        return PlateauAct("int", **kwargs)
     else:
         raise ValueError("Unkown rounder method {}".format(name))
 
@@ -789,6 +792,9 @@ def get_gate(gating, *args, **kwargs):
         the new value to the previous. `"highway"` gating using convex
         combination. `"gates_res"` gates the previous value and add the new one.
     """
+    if isinstance(gating, str):
+        gating = gating.lower()
+
     if gating is None:
         return no_gate
     elif gating == "force":

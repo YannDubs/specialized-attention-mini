@@ -186,7 +186,7 @@ class LocationAttender(Module):
                        pdf=self.pdf)
         torch.save(locator, file)
 
-    def forward(self, query, source_lengths, step, attn_old):
+    def forward(self, query, source_lengths, step, attn_old, provided_attention=None):
         """Compute and return the location attention, confidence.
 
         Args:
@@ -213,7 +213,7 @@ class LocationAttender(Module):
         source_lengths_list, source_lengths_tensor = format_source_lengths(source_lengths)
 
         mu, sigma = self._compute_parameters(query, step, source_lengths_tensor,
-                                             attn_old)
+                                             attn_old, provided_attention)
 
         confidence = self._sigma_to_conf(sigma).squeeze(-1)
 
@@ -229,7 +229,7 @@ class LocationAttender(Module):
         return loc_attn, confidence
 
     def _compute_parameters(self, weighter_inputs, step, source_lengths_tensor,
-                            attn_old):
+                            attn_old, provided_attention):
         """Compute the parameters of the positioning function.
 
         Return:
@@ -247,7 +247,7 @@ class LocationAttender(Module):
                                                          self.storer["weighter_hidden"])
 
         mu = self.mu_generator(weighter_out, step, source_lengths_tensor,
-                               attn_old)
+                               attn_old, provided_attention)
 
         sigma = self.sigma_generator(weighter_out, mu, step)
 
@@ -533,15 +533,12 @@ class MuGenerator(Module):
             plat_bias = [-.5, .5] if self.is_l0 else[-.5, 0, .5]
 
             if self.clipping_step != 1:
-                self.acti_plat_step = PlateauAct(plateaus=plateaus_step)
+                self.acti_plat_step = PlateauAct(plateaus_step)
             if self.force_mu is not None:
-                self.acti_plat_int = PlateauAct(plateaus="int")
-            self.acti_plat_sign = PlateauAct(plateaus=plat_sign,
-                                             len_plateaus=5e-1)
-            self.acti_plat_bias = PlateauAct(plateaus=plat_bias,
-                                             len_plateaus=3e-1)
-            self.acti_plat_bin = PlateauAct(plateaus=[0, 1.],
-                                            len_plateaus=3e-1)
+                self.acti_plat_int = PlateauAct("int")
+            self.acti_plat_sign = PlateauAct(plat_sign, len_plateaus=5e-1)
+            self.acti_plat_bias = PlateauAct(plat_bias, len_plateaus=3e-1)
+            self.acti_plat_bin = PlateauAct([0, 1.], len_plateaus=3e-1)
 
             self.weight_bias = torch.tensor([weight_bias[l] for l in self.weight_labels],
                                             device=device, dtype=torch.float)
