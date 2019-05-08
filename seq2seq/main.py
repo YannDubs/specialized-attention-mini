@@ -90,7 +90,7 @@ def get_seq2seq_model(src_len,
                       positioning_method="gaussian",
                       rate_start_round=0.05,
                       anneal_temp_round=0.1,
-                      rounder_mu=None, # keeping in case better when extrapolating
+                      rounder_mu="concrete",
                       mode_attn_mix="loc_conf",  # TO DO - medium: chose best and remove parameter
                       rate_attmix_wait=0.05,  # TO DO - medium: chose best and remove parameter
                       dflt_perc_loc=0.7,  # TO DO - medium: chose best and remove parameter
@@ -98,15 +98,16 @@ def get_seq2seq_model(src_len,
                       is_dev_mode=False,
                       is_viz_train=False,
                       attender="attender",
-                      is_reg_clamp_mu=True,  # DEV MODE: seems better
+                      is_reg_clamp_mu=True,  # DEV MODE
                       pretrained_locator=None,  # DEV MODE
-                      gating=None,  # keeping in case one might be gated (but generally not better)
+                      gating="highway",  # DEV MODE
                       is_diagonal=False,  # DEV MODE
                       clipping_step=3,  # DEV MODE
                       is_rnn_loc=True,  # DEV MODE
                       is_l0=False,  # DEV MODE
                       is_reg_mu_gates=False,  # DEV MODE
                       location_size=64,  # DEV MODE
+                      rounder_weights=None,  # DEV MODE
                       is_force_sigma=False,  # DEV MODE
                       force_mu=None,  # DEV MODE
                       ):
@@ -254,6 +255,7 @@ def get_seq2seq_model(src_len,
                      clipping_step=clipping_step,
                      is_l0=is_l0,
                      is_reg_mu_gates=is_reg_mu_gates,
+                     rounder_weights_kwargs=rounders_kwargs[rounder_weights],
                      force_mu=force_mu)
 
     location_kwargs = dict(n_steps_prepare_pos=n_steps_prepare_pos,
