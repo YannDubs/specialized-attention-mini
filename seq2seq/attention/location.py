@@ -463,14 +463,14 @@ class MuGenerator(Module):
                  n_steps_prepare_pos=100,
                  is_reg_clamp_mu=True,
                  clipping_step=2,
-                 weight_bias=dict(mean_attn_old=0.7,  # good to look at start
-                                  diagonal=0.5,
-                                  single_step=1,
+                 weight_bias=dict(mean_attn_old=0.9,  # good to look at start
+                                  diagonal=0.1,
+                                  single_step=.1,
                                   bias=0.,  # center of pleateau
                                   step_sign=0.,
                                   provided=1),
-                 weight_factor=dict(mean_attn_old=0.1,
-                                    diagonal=0.1,
+                 weight_factor=dict(mean_attn_old=0.5,
+                                    diagonal=0.5,
                                     single_step=0.1,
                                     step_sign=0.1,
                                     bias=0.01,

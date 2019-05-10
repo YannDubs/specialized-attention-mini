@@ -190,6 +190,7 @@ class AttentionMixer(Module):
                 (batch_size, n_queries, kq_size) used for the generation of some
                 variables. Can be `None` if unused.
         """
+
         if not self.training or self.n_training_calls >= self.n_steps_wait:
             if self.mode == "loc_conf":
                 perc_loc = conf_loc.unsqueeze(-1)
@@ -202,7 +203,7 @@ class AttentionMixer(Module):
                 raise ValueError("Unkown mode={}".format(self.mode))
         else:
             batch_size = content_attn.size(0)
-            perc_loc = self.dflt_perc_loc.expand(batch_size, 1)
+            perc_loc = self.dflt_perc_loc.expand(batch_size, 1, 1)
 
         if self.rounder_perc is not None:
             perc_loc = self.rounder_perc(perc_loc)

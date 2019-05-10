@@ -90,7 +90,7 @@ def get_seq2seq_model(src_len,
                       positioning_method="gaussian",
                       rate_start_round=0.05,
                       anneal_temp_round=0.1,
-                      rounder_mu="concrete",
+                      rounder_mu="softConcrete",
                       mode_attn_mix="loc_conf",  # TO DO - medium: chose best and remove parameter
                       rate_attmix_wait=0.05,  # TO DO - medium: chose best and remove parameter
                       dflt_perc_loc=0.7,  # TO DO - medium: chose best and remove parameter
@@ -100,7 +100,7 @@ def get_seq2seq_model(src_len,
                       attender="attender",
                       is_reg_clamp_mu=True,  # DEV MODE
                       pretrained_locator=None,  # DEV MODE
-                      gating="highway",  # DEV MODE
+                      gating=None,  # DEV MODE
                       is_diagonal=False,  # DEV MODE
                       clipping_step=3,  # DEV MODE
                       is_rnn_loc=True,  # DEV MODE
