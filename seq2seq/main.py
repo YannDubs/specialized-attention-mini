@@ -59,16 +59,20 @@ def _rename_latest_file(path, new_name):
     os.rename(latest_file, os.path.join(path, new_name))
 
 
-def get_is_attn_field(attender, loss_names, force_mu):
+def get_is_attn_field(attender, loss_names, metric_names, force_mu):
     """Whether to add the attention field."""
     is_hard_attn = attender == "hard"
-    is_attn_loss = False
     for loss_name in loss_names:
-        if isinstance(loss_name, str) and "attention" in loss_names:
-            is_attn_loss = True
+        if isinstance(loss_name, str) and "attention" in loss_name:
+            return True
         elif "attention" in loss_name[0]:
-            is_attn_loss = True
-    return is_hard_attn or is_attn_loss or force_mu is not None
+            return True
+    for metric_name in metric_names:
+        if isinstance(loss_name, str) and "attention" in metric_name:
+            return True
+        elif "attention" in metric_name[0]:
+            return True
+    return is_hard_attn or force_mu is not None
 
 
 def get_seq2seq_model(src_len,
@@ -86,7 +90,7 @@ def get_seq2seq_model(src_len,
                       content_method='scaledot',  # see if scaledmult better
                       value_size=-1,
                       value_noise_sigma=0,
-                      n_steps_prepare_pos=100,
+                      n_steps_prepare_pos=300,
                       positioning_method="gaussian",
                       rate_start_round=0.05,
                       anneal_temp_round=0.1,
@@ -101,15 +105,14 @@ def get_seq2seq_model(src_len,
                       is_reg_clamp_mu=True,  # DEV MODE
                       pretrained_locator=None,  # DEV MODE
                       gating=None,  # DEV MODE
-                      is_diagonal=False,  # DEV MODE
                       clipping_step=3,  # DEV MODE
-                      is_rnn_loc=True,  # DEV MODE
-                      is_l0=False,  # DEV MODE
-                      is_reg_mu_gates=False,  # DEV MODE
+                      is_rnn_loc=False,  # DEV MODE
                       location_size=64,  # DEV MODE
-                      rounder_weights=None,  # DEV MODE
                       is_force_sigma=False,  # DEV MODE
                       force_mu=None,  # DEV MODE
+                      is_plateau_step=True,
+                      is_plateau_bias=True,
+                      mu_noise=0.
                       ):
     """Return a initialized extrapolator model.
 
@@ -251,12 +254,11 @@ def get_seq2seq_model(src_len,
 
     mu_kwargs = dict(rounder_mu_kwargs=rounders_kwargs[rounder_mu],
                      is_reg_clamp_mu=is_reg_clamp_mu,
-                     is_diagonal=is_diagonal,
                      clipping_step=clipping_step,
-                     is_l0=is_l0,
-                     is_reg_mu_gates=is_reg_mu_gates,
-                     rounder_weights_kwargs=rounders_kwargs[rounder_weights],
-                     force_mu=force_mu)
+                     rounder_perc_kwargs=rounders_kwargs[rounder_perc],
+                     is_plateau_step=is_plateau_step,
+                     is_plateau_bias=is_plateau_bias,
+                     mu_noise=mu_noise)
 
     location_kwargs = dict(n_steps_prepare_pos=n_steps_prepare_pos,
                            pdf=positioning_method,
@@ -416,7 +418,7 @@ def train(train_path,
         logging.info("Cuda device set to {}".format(cuda_device))
         torch.cuda.set_device(cuda_device)
 
-    is_attn_field = get_is_attn_field(attender, loss_names, force_mu)
+    is_attn_field = get_is_attn_field(attender, loss_names, metric_names, force_mu)
 
     train, dev, src, tgt, oneshot = get_train_dev(train_path,
                                                   dev_path,

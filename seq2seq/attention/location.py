@@ -18,8 +18,10 @@ from seq2seq.util.helpers import (renormalize_input_length, get_rnn, get_extra_r
                                   clamp, format_source_lengths, leaky_noisy_clamp,
                                   clamp_regularize, HyperparameterInterpolator,
                                   HyperparameterCurriculumInterpolator, get_indices,
-                                  regularization_loss, batch_reduction_f, inv_sigmoid)
-from seq2seq.util.torchextend import get_rounder, L0Gates, get_gate, PlateauAct
+                                  regularization_loss, batch_reduction_f, inv_sigmoid,
+                                  identity)
+from seq2seq.util.torchextend import (get_rounder, get_gate, PlateauAct,
+                                      ProbabilityConverter, GaussianNoise)
 from seq2seq.util.initialization import replicate_hidden0, init_param
 from seq2seq.util.base import Module
 
@@ -31,14 +33,6 @@ def get_regularizers_location(total_training_calls, n_steps_prepare_pos):
         max_p_interpolators[name] = HyperparameterCurriculumInterpolator(curriculum, **kwargs)
 
     max_p_interpolators = dict()
-
-    _initialize_regularizer("pos_l0_weights",
-                            [dict(step=int(n_steps_prepare_pos / 2), value=0),
-                             dict(step=n_steps_prepare_pos, value=1e-3)])
-
-    _initialize_regularizer("pos_mu_gates",
-                            [dict(step=int(n_steps_prepare_pos / 2), value=0),
-                             dict(step=n_steps_prepare_pos, value=1e-3)])
 
     _initialize_regularizer("pos_clamp_mu", [dict(step=0, value=1e-2)])
 
@@ -205,6 +199,7 @@ class LocationAttender(Module):
             confidence (torch.tensor): confidence of location attenton. Shape:
                 (batch_size, n_queries).
         """
+
         batch_size, n_queries, _ = query.size()
         if n_queries != 1:
             txt = "`n_queries = {}` but only single query supported for now."
@@ -462,25 +457,20 @@ class MuGenerator(Module):
                  gating="gated_res",
                  n_steps_prepare_pos=100,
                  is_reg_clamp_mu=True,
-                 clipping_step=2,
-                 weight_bias=dict(mean_attn_old=0.9,  # good to look at start
-                                  diagonal=0.1,
-                                  single_step=.1,
-                                  bias=0.,  # center of pleateau
-                                  step_sign=0.,
-                                  provided=1),
-                 weight_factor=dict(mean_attn_old=0.5,
-                                    diagonal=0.5,
-                                    single_step=0.1,
-                                    step_sign=0.1,
-                                    bias=0.01,
-                                    provided=1),
+                 clipping_step=3,
+                 perc_attn_old=0.7,
+                 weight_bias=dict(perc_attn_old=0.,  # weight_bias["perc_attn_old"] = 0
+                                  single_step=1.,  # start with half forward step
+                                  bias=0.1,  # start looking at begining
+                                  ),
+                 weight_factor=dict(perc_attn_old=.5,
+                                    single_step=.5,
+                                    bias=.5),  # make slow changes
                  rounder_mu_kwargs={},
-                 is_diagonal=True,  # DEV MODE
-                 is_l0=True,  # DEV MODE
-                 is_reg_mu_gates=False,  # DEV MODE
-                 rounder_weights_kwargs={},  # DEV MODE
-                 force_mu=None,
+                 rounder_perc_kwargs={},
+                 is_plateau_step=True,
+                 is_plateau_bias=True,
+                 mu_noise=0.,
                  **kwargs
                  ):
 
@@ -489,84 +479,33 @@ class MuGenerator(Module):
         self.max_len = max_len
         self.n_steps_prepare_pos = n_steps_prepare_pos
         self.is_reg_clamp_mu = is_reg_clamp_mu
-        self.gating = gating if not is_reg_mu_gates else "highway"
-        self.is_l0 = is_l0
-        self.is_reg_mu_gates = is_reg_mu_gates
         self.clipping_step = clipping_step
-        self.force_mu = force_mu
+        self.is_plateau_step = is_plateau_step
+        self.is_plateau_bias = is_plateau_bias
+        self.perc_attn_old = perc_attn_old
 
         # Building blocks
         self.single_step = torch.tensor(1. / (self.max_len - 1)).to(device)
-        self.bias = torch.tensor(1.0).to(device)
-        if is_diagonal:
-            self.bb_labels = ["mean_attn_old", "diagonal", "single_step", "bias"]
-        else:
-            self.bb_labels = ["mean_attn_old", "single_step", "bias"]
-        if self.force_mu is not None:
-            self.bb_labels += ["provided"]
-        self.weight_labels = self.bb_labels
-        self.n_weights = len(self.weight_labels)
-        self.n_building_blocks = len(self.bb_labels)
+        self.bb_labels = ["single_step", "perc_attn_old", "bias"]
         # make the mu weights change relatively little at the begining
         # as small mu weight makes a big difference
-        self.weight_factor = torch.tensor([weight_factor[l] for l in self.weight_labels],
+        self.weight_bias = weight_bias
+        self.weight_factor = weight_factor
+
+        self.mu_weights_generator = Generator(hidden_size, len(self.bb_labels), **kwargs)
+        self.gaussian_noise = GaussianNoise(is_relative_sigma=False, sigma=mu_noise)
+
+        self.to_proba = ProbabilityConverter(initial_probability=perc_attn_old)
+        self.rounder_perc = get_rounder(**rounder_perc_kwargs)
+
+        #plateaus_step = list(range(-self.clipping_step, self.clipping_step + 1))
+        #self.acti_plat_step = PlateauAct(plateaus_step) if self.is_plateau_step else identity
+        self.acti_plat_step = PlateauAct([-1, 1]) if self.is_plateau_step else identity
+        self.acti_plat_bias = PlateauAct([0, 1]) if self.is_plateau_bias else identity
+        self.weight_bias = torch.tensor([self.weight_bias[l] for l in self.bb_labels],
+                                        device=device, dtype=torch.float)
+        self.weight_factor = torch.tensor([self.weight_factor[l] for l in self.bb_labels],
                                           device=device, dtype=torch.float)
-
-        self.mu_weights_generator = Generator(hidden_size, self.n_weights,
-                                              **kwargs)
-
-        self.gate = get_gate(self.gating, hidden_size, self.n_weights,
-                             is_single_gate=False, save_name="mu_gates",
-                             is_reg=self.is_reg_mu_gates,
-                             # is_round=self.is_reg_mu_gates. TO TEST
-                             )
-
-        self.rounder_weights = get_rounder(**rounder_weights_kwargs)
-
-        if self.rounder_weights is None:
-            if self.clipping_step is None:
-                plateaus_step = "int"
-            else:
-                plateaus_step = list(range(-self.clipping_step, self.clipping_step + 1))
-
-            plat_sign = [-1, 1] if self.is_l0 else[-1, 0, 1]
-            plat_bias = [-.5, .5] if self.is_l0 else[-.5, 0, .5]
-
-            if self.clipping_step != 1:
-                self.acti_plat_step = PlateauAct(plateaus_step)
-            if self.force_mu is not None:
-                self.acti_plat_int = PlateauAct("int")
-            self.acti_plat_sign = PlateauAct(plat_sign, len_plateaus=5e-1)
-            self.acti_plat_bias = PlateauAct(plat_bias, len_plateaus=3e-1)
-            self.acti_plat_bin = PlateauAct([0, 1.], len_plateaus=3e-1)
-
-            self.weight_bias = torch.tensor([weight_bias[l] for l in self.weight_labels],
-                                            device=device, dtype=torch.float)
-        else:
-            reweighted_bias = []
-            for l in self.weight_labels:
-                w = weight_bias[l]
-                if l == "diagonal":
-                    w = (weight_bias[l] + 1) / 2
-                elif l in ["bias", "step_sign"]:
-                    w = w + 0.5
-                # when rounders use sigmoid => put bias in "logit space" =>
-                # linear approx of inverse sigmoid
-                reweighted_bias.append((w - 0.5) / .2)
-
-            self.weight_bias = torch.tensor(reweighted_bias,
-                                            device=device, dtype=torch.float)
-
-        if self.is_l0:
-            self.linear_l0_weights = L0Gates(hidden_size, self.n_building_blocks,
-                                             is_at_least_1=True,
-                                             initial_gates=1. if self.is_l0 else 0,
-                                             gating=self.gating,
-                                             rounder=rounder_weights_kwargs["name"])
-
-            self.loss_weights = torch.ones(self.n_building_blocks, device=device)
-            self.loss_weights[self.weight_labels.index("single_step")] = 2.
-            self.loss_weights[self.weight_labels.index("bias")] = 2.
 
         self.rounder_mu = get_rounder(**rounder_mu_kwargs)
 
@@ -584,17 +523,11 @@ class MuGenerator(Module):
 
     def extra_repr(self):
         return get_extra_repr(self,
-                              always_shows=["is_reg_clamp_mu"],
-                              conditional_shows=["gating", "force_mu"])
+                              always_shows=["is_reg_clamp_mu", "is_plateau_step", "is_plateau_bias"],
+                              conditional_shows=[])
 
     def reset_parameters(self):
         """Reset and initialize the module parameters."""
-        # start at 0.2 to bias looking at start
-        self.mean_attn_old0 = Parameter(torch.tensor(0.2))
-
-        self.old_weights0 = (init_param(Parameter(torch.ones_like(self.weight_bias))
-                                        ) * self.weight_factor) + self.weight_bias
-
         if self.is_reg_clamp_mu:
             self.get_clamping_eps.reset_parameters()
 
@@ -619,125 +552,53 @@ class MuGenerator(Module):
         """
         batch_size, n_queries, _ = weighter_out.size()
 
-        raw_mu_weights = (self.mu_weights_generator(weighter_out) * self.weight_factor
-                          ) + self.weight_bias
-        if self.force_mu == "bb-zeroW":
-            raw_mu_weights[..., :-1] = raw_mu_weights[..., :-1] * 0
-        elif self.force_mu == "all":
-            raw_mu_weights = raw_mu_weights * 0
-            raw_mu_weights[..., -1] = raw_mu_weights[..., -1] + 1
+        raw_mu_weights = (self.gaussian_noise(self.mu_weights_generator(weighter_out)) *
+                          self.weight_factor) + self.weight_bias
         self.storer["raw_mu_weights"] = raw_mu_weights
-        mu_weights = self._transform_weights(raw_mu_weights, step, weighter_out)
 
-        building_blocks = self._get_building_blocks(weighter_out,
-                                                    source_lengths_tensor,
-                                                    step,
-                                                    attn_old,
-                                                    provided_attention)
+        w_single_step, perc_attn_old, bias = raw_mu_weights.unbind(-1)
+        perc_attn_old = self.to_proba(perc_attn_old)
+        bias = self.acti_plat_bias(bias)
 
-        mu = torch.bmm(mu_weights.view(batch_size * n_queries, 1, self.n_building_blocks),
-                       building_blocks.view(batch_size * n_queries, self.n_building_blocks, 1))
-        mu = mu.view(batch_size, n_queries, 1)
+        if self.n_training_calls >= self.n_steps_prepare_pos:
+            w_single_step = self.acti_plat_step(w_single_step)
+            if self.rounder_perc is not None:
+                perc_attn_old = self.rounder_perc(perc_attn_old)
+
+        unormalized_counter = self.rel_counter.expand(batch_size, self.max_len, 1)
+        rel_counter = renormalize_input_length(unormalized_counter,
+                                               source_lengths_tensor - 1,
+                                               self.max_len - 1)
+
+        if step == 0:
+            perc_attn_old = perc_attn_old * 0  # for plotting
+            mean_attn_old = bias
+            w_single_step = w_single_step * 0  # begining only look at bias
+            start = bias  # no old attention at first step
+        else:
+            mean_attn_old = torch.bmm(attn_old,
+                                      rel_counter[:, :attn_old.size(2), :]).squeeze(-1)
+            start = perc_attn_old * mean_attn_old + (1 - perc_attn_old) * bias
+
+        single_step = self.single_step.expand(batch_size, n_queries, 1)
+        single_step = renormalize_input_length(single_step,
+                                               source_lengths_tensor - 1,
+                                               self.max_len - 1)
+
+        mu = start.unsqueeze(-1) + w_single_step.unsqueeze(-1) * single_step
+
+        self.add_to_visualize([single_step.squeeze(1), mean_attn_old, w_single_step,
+                               bias, perc_attn_old],
+                              ["single_step", "mean_attn_old", "w_single_step",
+                               "bias", "perc_attn_old"])
+        self.add_to_test([mean_attn_old, w_single_step,
+                          bias, perc_attn_old],
+                         ["mean_attn_old", "w_single_step",
+                          "bias", "perc_attn_old"])
 
         mu = self._transform_mu(mu, source_lengths_tensor, step)
 
-        self.add_to_test([mu_weights, raw_mu_weights], ['mu_weights', 'raw_mu_weights'])
-        self.add_to_visualize([mu_weights], ['mu_weights'])
-
-        # set back to mu in [0,1]
-        mu = mu + 0.5
-
         return mu
-
-    def _transform_weights(self, mu_weights, step, weighter_out):
-        """Transforms the building block weights.
-
-        Return:
-            mu_weights (torch.FloatTensor): building blocks weights. Shape:
-                (batch_size, n_queries, n_building_blocks).
-        """
-        # gate
-        mu_weights_old = (self.old_weights0.expand_as(mu_weights)
-                          if step == 0 else self.storer["raw_mu_weights"])
-        if self.is_reg_mu_gates:
-            mu_weights, loss = self.gate(mu_weights, mu_weights_old, weighter_out)
-            if self.is_regularize:
-                self.add_regularization_loss("pos_mu_gates", loss)
-        else:
-            mu_weights = self.gate(mu_weights, mu_weights_old, weighter_out)
-
-        # plateau activation
-        dict_mu_weights = dict(zip(self.weight_labels, mu_weights.unbind(-1)))
-
-        if self.rounder_weights is None:
-            for l in self.bb_labels:
-                if l == "diagonal":
-                    dict_mu_weights[l] = self.acti_plat_sign(dict_mu_weights[l])
-                elif l == "single_step":
-                    dict_mu_weights[l] = self.acti_plat_step(dict_mu_weights[l])
-                elif l == "bias":
-                    dict_mu_weights[l] = self.acti_plat_bias(dict_mu_weights[l])
-                elif l == "mean_attn_old":
-                    if self.is_l0:
-                        dict_mu_weights[l] = dict_mu_weights[l] * 0 + 1
-                    else:
-                        dict_mu_weights[l] = self.acti_plat_bin(dict_mu_weights[l])
-                elif l == "provided":
-                    dict_mu_weights[l] = self.acti_plat_int(dict_mu_weights[l])
-                else:
-                    raise ValueError("Unkown label={}".format(l))
-        else:
-            # use sigmoid for all because used inverse sigmoid for weight init
-            for i, l in enumerate(self.bb_labels):
-                is_update = (step == 0 and i == 0)
-                if l == "diagonal":
-                    dict_mu_weights[l] = torch.sigmoid(dict_mu_weights[l])
-                    if self.is_l0:
-                        dict_mu_weights[l] = self.rounder_weights(dict_mu_weights[l],
-                                                                  is_update=is_update) * 2 - 1
-                    else:
-                        # also plateau at 0
-                        dict_mu_weights[l] = self.rounder_weights(dict_mu_weights[l] * 2 - 1,
-                                                                  is_update=is_update)
-
-                elif l == "single_step":
-                    dict_mu_weights[l] = self.rounder_weights(dict_mu_weights[l])
-
-                elif l == "bias":
-                    dict_mu_weights[l] = torch.sigmoid(dict_mu_weights[l])
-                    if self.is_l0:
-                        dict_mu_weights[l] = self.rounder_weights(dict_mu_weights[l],
-                                                                  is_update=is_update) - .5
-                    else:
-                        dict_mu_weights[l] = (self.rounder_weights(dict_mu_weights[l] + 1,
-                                                                   is_update=is_update) - 1) / 2
-                elif l == "mean_attn_old":
-                    if self.is_l0:
-                        dict_mu_weights[l] = dict_mu_weights[l] * 0 + 1
-                    else:
-                        dict_mu_weights[l] = torch.sigmoid(dict_mu_weights[l])
-                        dict_mu_weights[l] = self.rounder_weights(dict_mu_weights[l])
-                elif l == "provided":
-                    dict_mu_weights[l] = self.rounder_weights(dict_mu_weights[l])
-                else:
-                    raise ValueError("Unkown label={}".format(l))
-
-        ordered_weights = [dict_mu_weights[l] for l in self.bb_labels]
-        mu_weights = torch.stack(ordered_weights, dim=2)
-
-        if self.is_l0:
-            gates, loss = self.linear_l0_weights(weighter_out,
-                                                 is_reset=step == 0,
-                                                 loss_weights=self.loss_weights)
-            if self.is_regularize:
-                self.add_regularization_loss("pos_l0_weights", loss)
-
-            self.add_to_visualize(gates.sum(-1).mean(), "bb_gates")
-            self.add_to_test([mu_weights, gates], ['ungated_weights', "bb_gates"])
-
-            mu_weights = (mu_weights * gates)
-
-        return mu_weights
 
     def _transform_mu(self, mu, source_lengths_tensor, step):
         """Postpreocessing of `mu`.
@@ -751,87 +612,24 @@ class MuGenerator(Module):
         normalizer = (source_lengths_tensor - 1).unsqueeze(1).unsqueeze(1)
         if self.rounder_mu is not None:
             # rounding to words
-            mu = self.rounder_mu((mu + 0.5) * normalizer,
+            mu = self.rounder_mu(mu * normalizer,
                                  is_update=is_update
-                                 ) / normalizer - 0.5
+                                 ) / normalizer
 
         if self.is_regularize and self.is_reg_clamp_mu:
             eps = self.get_clamping_eps(is_update)
             delta = 0.01
             mu, loss = clamp_regularize(mu,
                                         negative_slope=0.1,
-                                        minimum=-(0.5 + delta),
-                                        maximum=0.5 + delta,
+                                        minimum=-delta,
+                                        maximum=1 + delta,
                                         is_leaky=True,
                                         reg_kwargs=dict(p=1, min_x=eps))
             self.add_regularization_loss("pos_clamp_mu", loss)
         else:
             mu = clamp(mu,
-                       minimum=-0.5,
-                       maximum=0.5,
+                       minimum=0.,
+                       maximum=1.,
                        is_leaky=True)
 
         return mu
-
-    def _get_building_blocks(self, query, source_lengths_tensor, step, attn_old, provided_attention):
-        """Get the inputs and the buillding blocks for location generation.
-
-        Return:
-            building_blocks (torch.FloatTensor): building blocks of size
-                (batch_size, n_queries, n_building_blocks)
-        """
-        batch_size, n_queries, _ = query.size()
-
-        unormalized_counter = self.rel_counter.expand(batch_size, self.max_len, 1)
-        rel_counter = renormalize_input_length(unormalized_counter,
-                                               source_lengths_tensor - 1,
-                                               self.max_len - 1)
-
-        if step == 0:
-            mean_attn_old = self.mean_attn_old0.expand(batch_size,
-                                                       n_queries, 1)
-        else:
-            mean_attn_old = torch.bmm(attn_old,
-                                      rel_counter[:, :attn_old.size(2), :]
-                                      )
-
-        # t/n
-        diagonal = rel_counter[:, step:step + n_queries, :]
-
-        single_step = self.single_step.expand(batch_size, n_queries, 1)
-        single_step = renormalize_input_length(single_step,
-                                               source_lengths_tensor - 1,
-                                               self.max_len - 1)
-
-        bias = self.bias.expand(batch_size, n_queries, 1)
-
-        if self.force_mu is not None:
-            n_queries = query.size(1)
-
-            # If we have shorter examples in a batch, attend the PAD outputs to the
-            # first encoder state
-            provided_attention.masked_fill_(provided_attention.eq(-1), 0)
-            provided = provided_attention[:, step:step + n_queries
-                                          ].unsqueeze(-1).float() * single_step
-        else:
-            provided = None
-
-        building_blocks = dict(mean_attn_old=mean_attn_old,
-                               diagonal=diagonal,
-                               bias=bias,
-                               single_step=single_step,
-                               provided=provided)
-
-        # convert to the the new setup where 0 is the middle
-        for l in self.bb_labels:
-            if l in ["diagonal", "mean_attn_old", "provided"]:
-                building_blocks[l] = building_blocks[l] - 0.5
-
-        ordered_blocks = [building_blocks[l] for l in self.bb_labels]
-        building_blocks = torch.cat(ordered_blocks, dim=2)
-
-        self.add_to_visualize([building_blocks.squeeze(1), mean_attn_old],
-                              ["building_blocks", "mean_attn"])
-        self.add_to_test(building_blocks.squeeze(1), "building_blocks")
-
-        return building_blocks

@@ -17,12 +17,13 @@ class Evaluator(object):
         batch_size (int, optional): batch size for evaluator (default: 64)
     """
 
-    def __init__(self, loss=[NLLLoss()], metrics=[WordAccuracy(), SequenceAccuracy()], batch_size=64):
+    def __init__(self, loss=[NLLLoss()], metrics=[WordAccuracy(), SequenceAccuracy()],
+                 batch_size=64):
         self.losses = loss
         self.metrics = metrics
         self.batch_size = batch_size
 
-    def update_batch_metrics(self, metrics, other, target_variable):
+    def update_batch_metrics(self, metrics, other, target_variable, input_lengths):
         """
         Update a list with metrics for current batch.
 
@@ -34,11 +35,8 @@ class Evaluator(object):
         Returns:
             metrics (list): list with updated metrics
         """
-        # evaluate output symbols
-        outputs = other['sequence']
-
         for metric in metrics:
-            metric.eval_batch(outputs, target_variable)
+            metric.eval_batch(other, target_variable, input_lengths)
 
         return metrics
 
@@ -127,7 +125,7 @@ class Evaluator(object):
                                                                target_variables=target_variable)
 
                 # Compute metric(s) over one batch
-                metrics = self.update_batch_metrics(metrics, other, target_variable)
+                metrics = self.update_batch_metrics(metrics, other, target_variable, input_lengths)
 
                 # Compute loss(es) over one batch
                 losses = self.update_loss(losses, decoder_outputs, decoder_hidden, other, target_variable, input_lengths)

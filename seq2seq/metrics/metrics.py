@@ -1,4 +1,11 @@
 import torch
+import torch.nn as nn
+
+from torch.nn.utils.rnn import pad_sequence
+
+import seq2seq
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def _get_metric(metric_name, src, tgt, is_predict_eos):
@@ -24,6 +31,8 @@ def _get_metric(metric_name, src, tgt, is_predict_eos):
                                        output_pad_symbol,
                                        output_eos_symbol,
                                        output_unk_symbol)
+    elif metric_name == "attention mse metric":
+        return AttentionMSEMetric(ignore_index=seq2seq.IGNORE_INDEX)
     else:
         raise ValueError("Unkown metric : {}".format(metric_name))
 
@@ -61,10 +70,11 @@ class Metric(object):
             sub-classes.
     """
 
-    def __init__(self, name, log_name, input_var):
+    def __init__(self, name, log_name, inputs, target):
         self.name = name
         self.log_name = log_name
-        self.input = input_var
+        self.inputs = inputs
+        self.target = target
 
     def reset(self):
         """ Reset accumulated metric values"""
@@ -79,7 +89,7 @@ class Metric(object):
         """
         raise NotImplementedError("Implement in subclass")
 
-    def eval_batch(self, outputs, target):
+    def eval_batch(self, other, target, input_lengths):
         """ Compute the metric for the batch given results and target results.
 
         Args:
@@ -99,14 +109,16 @@ class WordAccuracy(Metric):
 
     _NAME = "Word Accuracy"
     _SHORTNAME = "acc"
-    _INPUT = "sequence"
+    _INPUTS = "sequence"
+    _TARGETS = 'decoder_output'
 
     def __init__(self, ignore_index=None):
         self.ignore_index = ignore_index
         self.word_match = 0
         self.word_total = 0
 
-        super(WordAccuracy, self).__init__(self._NAME, self._SHORTNAME, self._INPUT)
+        super(WordAccuracy, self).__init__(self._NAME, self._SHORTNAME,
+                                           self._INPUTS, self._TARGETS)
 
     def get_val(self):
         if self.word_total != 0:
@@ -118,9 +130,10 @@ class WordAccuracy(Metric):
         self.word_match = 0
         self.word_total = 0
 
-    def eval_batch(self, outputs, targets):
+    def eval_batch(self, other, targets, input_lengths):
         # evaluate batch
-        targets = targets['decoder_output']
+        outputs = other[self.inputs]
+        targets = targets[self.target]
 
         for step, step_output in enumerate(outputs):
             target = targets[:, step + 1]
@@ -140,7 +153,8 @@ class FinalTargetAccuracy(Metric):
 
     _NAME = "Final Target Accuracy"
     _SHORTNAME = "target_acc"
-    _INPUT = "sequence"
+    _INPUTS = "sequence"
+    _TARGETS = 'decoder_output'
 
     def __init__(self, ignore_index, eos_id):    # TODO check if returns error if default is not given
         self.ignore_index = ignore_index
@@ -148,7 +162,8 @@ class FinalTargetAccuracy(Metric):
         self.word_match = 0
         self.word_total = 0
 
-        super(FinalTargetAccuracy, self).__init__(self._NAME, self._SHORTNAME, self._INPUT)
+        super(FinalTargetAccuracy, self).__init__(self._NAME, self._SHORTNAME,
+                                                  self._INPUTS, self._TARGETS)
 
     def get_val(self):
         if self.target_total != 0:
@@ -160,9 +175,10 @@ class FinalTargetAccuracy(Metric):
         self.target_match = 0
         self.target_total = 0
 
-    def eval_batch(self, outputs, targets):
+    def eval_batch(self, other, targets, input_lengths):
         # evaluate batch
-        targets = targets['decoder_output']
+        outputs = other[self.inputs]
+        targets = targets[self.target]
         batch_size = targets.size(0)
 
         self.target_total += batch_size
@@ -199,14 +215,16 @@ class SequenceAccuracy(Metric):
 
     _NAME = "Sequence Accuracy"
     _SHORTNAME = "seq_acc"
-    _INPUT = "seqlist"
+    _INPUTS = "sequence"
+    _TARGETS = 'decoder_output'
 
     def __init__(self, ignore_index=None):
         self.ignore_index = ignore_index
         self.seq_match = 0
         self.seq_total = 0
 
-        super(SequenceAccuracy, self).__init__(self._NAME, self._SHORTNAME, self._INPUT)
+        super(SequenceAccuracy, self).__init__(self._NAME, self._SHORTNAME,
+                                               self._INPUTS, self._TARGETS)
 
     def get_val(self):
         if self.seq_total != 0:
@@ -218,9 +236,9 @@ class SequenceAccuracy(Metric):
         self.seq_match = 0
         self.seq_total = 0
 
-    def eval_batch(self, outputs, targets):
-
-        targets = targets['decoder_output']
+    def eval_batch(self, other, targets, input_lengths):
+        outputs = other[self.inputs]
+        targets = targets[self.target]
 
         batch_size = targets.size(0)
 
@@ -262,7 +280,8 @@ class SymbolRewritingAccuracy(Metric):
 
     _NAME = "Symbol Rewriting Accuracy"
     _SHORTNAME = "sym_rwr_acc"
-    _INPUT = "seqlist"
+    _INPUTS = "sequence"
+    _TARGETS = 'encoder_input'
 
     def __init__(self,
                  input_vocab,
@@ -291,7 +310,8 @@ class SymbolRewritingAccuracy(Metric):
         self.seq_correct = 0
         self.seq_total = 0
 
-        super(SymbolRewritingAccuracy, self).__init__(self._NAME, self._SHORTNAME, self._INPUT)
+        super(SymbolRewritingAccuracy, self).__init__(self._NAME, self._SHORTNAME,
+                                                      self._INPUTS, self._TARGETS)
 
     def get_val(self):
         """
@@ -329,7 +349,7 @@ class SymbolRewritingAccuracy(Metric):
 
         all_correct = False
         # Check if the length is correct
-        length_check = True if len(prediction) == 3 * len(grammar) else False
+        length_check = len(prediction) == 3 * len(grammar)
         # Check if everything falls in the same bucket, and there are no repeats
         for idx, inp in enumerate(grammar):
             vocab_idx = grammar_vocab.index(inp) + 1
@@ -344,19 +364,19 @@ class SymbolRewritingAccuracy(Metric):
                 all_correct = True
         return all_correct
 
-    def eval_batch(self, outputs, targets):
+    def eval_batch(self, other, targets, input_lengths):
         """
         Evaluates one batch of inputs (grammar) and checks whether the predictions are correct in the
         specified grammar.
         Note that we assume that the input grammar's do not contain any EOS-like symbol
         Args:
-            outputs (list(torch.tensor)): Contains the predictions of the model. List of length max_output_length, where each element is a tensor of length batch_size
+            other (dict): dict generated by forward pass of model to be evaluatedmax_output_length, where each element is a tensor of length batch_size
             targets (dict): Dictionary containing the grammars
         """
-
+        outputs = other[self.inputs]
         # batch_size X N variable containing the indices of the model's input,
         # where N is the longest input
-        input_variable = targets['encoder_input']
+        input_variable = targets[self.target]
 
         batch_size = input_variable.size(0)
 
@@ -409,3 +429,96 @@ class SymbolRewritingAccuracy(Metric):
             # Check whether the prediction actually comes from the grammar
             if self.correct(grammar, prediction_correct_length):
                 self.seq_correct += 1
+
+
+class AttentionMSEMetric(Metric):
+    """
+    Batch average of amttention MSE.
+
+    Args:
+        ignore_index (int, optional): index of masked token
+    """
+
+    _NAME = "Attention MSE metric"
+    _SHORTNAME = "attn_mse_metric"
+    _INPUTS = "attention_score"
+    _TARGETS = "attention_target"
+
+    def __init__(self,
+                 ignore_index=None,
+                 eps=1e-4,
+                 is_rmse=True,
+                 max_len=50):
+        self.ignore_index = ignore_index
+        self.len_norm_term = 0
+        self.tmp_acc_loss = 0
+        self.is_rmse = is_rmse
+        self.eps = eps
+        self.criterion = nn.MSELoss(reduction='none')
+        self.acc_loss = 0
+        # normalization term
+        self.norm_term = 0
+
+        self.position = torch.arange(0, max_len,
+                                     dtype=torch.float,
+                                     device=device).unsqueeze(1)
+
+        super(AttentionMSEMetric, self).__init__(self._NAME, self._SHORTNAME,
+                                                 self._INPUTS, self._TARGETS)
+
+    def get_val(self):
+        # total loss for all batches
+        eps = 9  # choses how much to give when loss = 1. Currently 9/10=90%
+        loss = (self.acc_loss / self.norm_term).item()
+        metric = eps / (loss + eps)
+        return metric
+
+    def reset(self):
+        self.len_norm_term = 0
+        self.tmp_acc_loss = 0
+
+    def eval_batch(self, other, targets, input_lengths):
+        # evaluate batch
+        outputs = other[self.inputs]
+        targets = targets[self.target]
+
+        position = pad_sequence([self.position[:length]
+                                 for length in input_lengths],
+                                batch_first=True)
+
+        for step, step_output in enumerate(outputs):
+            step_target = targets[:, step + 1]
+            self.eval_step(step_output, step_target, position)
+
+        if len(outputs) > 0:
+            self._post_eval_batch()
+
+    def eval_step(self, step_outputs, step_target, position):
+        # will average first by sequence length then batch size
+        true_idx = step_target.data.ne(self.ignore_index).float()
+        self.len_norm_term += true_idx
+
+        batch_size = step_target.size(0)
+        attn = step_outputs.contiguous().view(batch_size, 1, -1)
+        mean_attn = torch.bmm(attn, position).squeeze()
+        mse = self.criterion(mean_attn, step_target.float())
+
+        # tmp_acc_loss keeps batch dimension
+        self.tmp_acc_loss += mse * true_idx
+
+    def _post_eval_batch(self):
+        # length normalization
+        acc_loss = self.tmp_acc_loss / self.len_norm_term.detach()
+        mean_acc_loss = acc_loss.mean()
+
+        if self.is_rmse:
+            # sqrt to have unit changes (don't make it too much dependent on length of seq)
+            # use eps to avoid nan loss when 0 mse
+            mean_acc_loss = torch.sqrt(mean_acc_loss + self.eps)
+
+        # batch normalization
+        self.acc_loss = self.acc_loss + mean_acc_loss
+
+        self.norm_term += 1
+        self.len_norm_term = 0
+        self.tmp_acc_loss = 0

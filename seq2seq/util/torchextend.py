@@ -226,7 +226,7 @@ class ProbabilityConverter(Module):
 
     def _probability_to_bias(self, p, initial_x=0):
         """Compute the bias to use given an inital `point(initial_x, p)`"""
-        assert p > self.min_p and p < 1 - self.min_p
+        assert p > self.min_p and p < 1 - self.min_p, "p:{}".format(p)
         range_p = 1 - self.min_p * 2
         p = (p - self.min_p) / range_p
         p = torch.tensor(p, dtype=torch.float)

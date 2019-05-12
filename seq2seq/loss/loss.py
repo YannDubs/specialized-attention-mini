@@ -203,7 +203,7 @@ class Loss(object):
                                  for length in input_lengths],
                                 batch_first=True)
 
-        #ipdb.set_trace()
+        # ipdb.set_trace()
         for step, step_output in enumerate(outputs):
             step_target = targets[:, step + 1]
             self.eval_step(step_output, step_target, position)
